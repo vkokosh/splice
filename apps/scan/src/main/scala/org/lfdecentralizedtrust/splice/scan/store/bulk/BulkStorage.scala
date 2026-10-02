@@ -39,7 +39,6 @@ import org.lfdecentralizedtrust.splice.scan.store.bulk.backfilling.{
   BftBulkObjectListing,
   BulkStorageBackfilling,
   KvBackfillingProgress,
-  PeerRotation,
   ScanPeerObjectSource,
   UpToFirstOwnSegment,
   VerifiedObjectCopier,
@@ -48,6 +47,7 @@ import org.lfdecentralizedtrust.splice.scan.store.historystart.ScanHistoryStart
 import org.lfdecentralizedtrust.splice.util.TemplateJsonDecoder
 
 import scala.concurrent.duration.*
+import scala.util.Random
 
 class BulkStorage(
     storageConfig: ScanStorageConfig,
@@ -151,7 +151,7 @@ class BulkStorage(
         new BftBulkObjectListing(scanConnection),
         new VerifiedObjectCopier(
           new ScanPeerObjectSource(scanConnection),
-          new PeerRotation,
+          peers => Random.shuffle(peers),
           stagingConnection,
           committedConnection,
           appConfig.backfilling.downloadParallelism,
