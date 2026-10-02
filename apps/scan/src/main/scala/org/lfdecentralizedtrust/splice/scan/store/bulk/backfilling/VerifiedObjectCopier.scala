@@ -21,7 +21,7 @@ trait ObjectCopier {
 
 class VerifiedObjectCopier(
     source: PeerObjectSource,
-    rotation: PeerRotation,
+    peerOrder: Seq[String] => Seq[String],
     staging: S3BucketConnection,
     committed: S3BucketConnection,
     parallelism: Int,
@@ -46,7 +46,7 @@ class VerifiedObjectCopier(
       case false =>
         for {
           peers <- source.peers
-          _ <- downloadVerifiedFromAny(obj, rotation.order(peers), Nil)
+          _ <- downloadVerifiedFromAny(obj, peerOrder(peers), Nil)
         } yield ()
     }
 

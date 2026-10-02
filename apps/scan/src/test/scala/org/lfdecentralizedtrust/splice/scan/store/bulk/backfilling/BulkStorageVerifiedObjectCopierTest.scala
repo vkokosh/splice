@@ -63,7 +63,7 @@ class BulkStorageVerifiedObjectCopierTest
   private def copier(source: PeerObjectSource) =
     new VerifiedObjectCopier(
       source,
-      new PeerRotation,
+      identity,
       localBucket("staging"),
       localBucket("committed"),
       parallelism = 1,
@@ -163,18 +163,6 @@ class BulkStorageVerifiedObjectCopierTest
         staged shouldBe onPeer
         checksums.map(_.checksum) shouldBe Seq(digest)
       }
-    }
-  }
-
-  "PeerRotation" should {
-    "start each order one position later" in {
-      val rotation = new PeerRotation
-      val peers = Seq("a", "b", "c")
-      rotation.order(peers) shouldBe Seq("a", "b", "c")
-      rotation.order(peers) shouldBe Seq("b", "c", "a")
-      rotation.order(peers) shouldBe Seq("c", "a", "b")
-      rotation.order(peers) shouldBe Seq("a", "b", "c")
-      rotation.order(Seq.empty) shouldBe Seq.empty
     }
   }
 }
