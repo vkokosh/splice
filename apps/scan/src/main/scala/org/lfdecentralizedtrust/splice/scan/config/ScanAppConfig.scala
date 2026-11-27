@@ -107,9 +107,10 @@ case class ScanAppBackendConfig(
       NonNegativeFiniteDuration.ofDays(7),
     miningRoundsCacheTimeToLiveOverride: Option[NonNegativeFiniteDuration] = None,
     enableForcedAcsSnapshots: Boolean = false,
-    // Whether each ACS snapshot should be stored in its own table
-    perAcsSnapshotTablesEnabled: Boolean = false,
+    // TODO(#8518): remove once no SV config sets it anymore
+    perAcsSnapshotTablesEnabled: Boolean = true,
     analyzableTimeWindow: AnalyzableTimeWindowConfig = AnalyzableTimeWindowConfig(),
+    pruning: ScanPruningConfig = ScanPruningConfig(),
     // The migration id is normally read from the DB (the highest known migration id in the
     // update history). It only needs to be resolved from a sponsor to bootstrap a node that does
     // not yet have any migration id in its DB (e.g. a freshly joining scan). In that case, the
@@ -122,8 +123,17 @@ case class ScanAppBackendConfig(
     updateHistoryBackfillBatchSize: Int = 100,
     updateHistoryBackfillImportUpdatesEnabled: Boolean = true,
     updateHistoryMaxPageSize: Int = Limit.DefaultMaxPageSize,
+    updateHistoryPartitionRunwayDays: Int = 7,
     txLogBackfillEnabled: Boolean = true,
     txLogBackfillBatchSize: Int = 100,
+    votesStoreBackfillingEnabled: Boolean = true,
+    votesStoreBackfillingPollingInterval: NonNegativeFiniteDuration =
+      NonNegativeFiniteDuration.ofSeconds(10),
+    votesStoreBackfillingPageSize: Int = 100,
+    // A scan whose update history starts with the founding transaction of the network copies the votes
+    // from there instead of from its peers, if that is at most this much history to read.
+    votesStoreBackfillingMaxLocalHistory: NonNegativeFiniteDuration =
+      NonNegativeFiniteDuration.ofDays(30),
     cache: ScanCacheConfig = ScanCacheConfig(),
     acsStoreDescriptorUserVersion: Option[Long] = None,
     txLogStoreDescriptorUserVersion: Option[Long] = None,
@@ -143,18 +153,30 @@ case class ScanAppBackendConfig(
     // where intentional overlap is required.
     instanceLockEnabled: Boolean = true,
 ) extends SpliceBackendConfig
-    with BaseScanAppConfig // TODO(DACH-NY/canton-network-node#736): fork or generalize this trait.
-    {
+    with BaseScanAppConfig {
+  require(
+    updateHistoryPartitionRunwayDays > 0,
+    "updateHistoryPartitionRunwayDays cannot be below 1 day",
+  )
+  require(
+    updateHistoryPartitionRunwayDays < 365,
+    "Large values of updateHistoryPartitionRunwayDays can delay startup or affect performance by having too many tables.",
+  )
   override val nodeTypeName: String = "scan"
 
   override def clientAdminApi: ClientConfig = adminApi.clientConfig
+
+  require(
+    perAcsSnapshotTablesEnabled,
+    "per-acs-snapshot-tables-enabled can no longer be disabled: ACS snapshots are always stored in per-snapshot tables",
+  )
 }
 
 case class AnalyzableTimeWindowConfig(
     duration: NonNegativeDuration = AnalyzableTimeWindowConfig.UnlimitedAtw
 ) {
   require(
-    duration.duration > AnalyzableTimeWindowConfig.MinimumAtw.duration,
+    duration.duration >= AnalyzableTimeWindowConfig.MinimumAtw.duration,
     s"The analyzable time window must be at least ${AnalyzableTimeWindowConfig.MinimumAtw}",
   )
 }
@@ -164,6 +186,14 @@ object AnalyzableTimeWindowConfig {
     NonNegativeDuration.tryFromDuration(scala.concurrent.duration.Duration.Inf)
 
 }
+
+final case class ScanPruningConfig(
+    snapshots: ScanSnapshotPruningConfig = ScanSnapshotPruningConfig()
+)
+
+final case class ScanSnapshotPruningConfig(
+    enabled: Boolean = false
+)
 
 final case class ScanRollForwardLsuConfig(
     upgradeTime: Option[
@@ -204,10 +234,6 @@ final case class ScanCacheConfig(
       maxSize = 1,
     ),
     rewardsCollectedInRound: CacheConfig = CacheConfig(
-      ttl = NonNegativeFiniteDuration.ofMinutes(1),
-      maxSize = 1000,
-    ),
-    amuletConfigForRound: CacheConfig = CacheConfig(
       ttl = NonNegativeFiniteDuration.ofMinutes(1),
       maxSize = 1000,
     ),

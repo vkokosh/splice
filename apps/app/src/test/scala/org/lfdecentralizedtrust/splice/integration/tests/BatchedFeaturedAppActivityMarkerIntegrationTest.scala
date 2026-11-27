@@ -12,7 +12,7 @@ import org.lfdecentralizedtrust.splice.config.ConfigTransforms
 import org.lfdecentralizedtrust.splice.console.ValidatorAppBackendReference
 import org.lfdecentralizedtrust.splice.environment.DarResources
 import org.lfdecentralizedtrust.splice.http.v0.definitions
-import definitions.DamlValueEncoding.members.CompactJson
+import definitions.DamlValueEncoding.members.LedgerApiJson
 import org.lfdecentralizedtrust.splice.integration.EnvironmentDefinition
 import org.lfdecentralizedtrust.splice.integration.tests.SpliceTests.{
   IntegrationTest,
@@ -132,15 +132,16 @@ class BatchedFeaturedAppActivityMarkerIntegrationTest
   "Batched activity marker creation produces only one view" in { implicit env =>
     val amuletVersion =
       sv1ScanBackend.getAmuletRules().payload.configSchedule.initialValue.packageConfig.amulet
+    val minimumAmuletVersion = DarResources.amulet.minimumInitialization.metadata.version
     // check that the test actually uses a different version
-    amuletVersion should not be "0.1.19"
-    clue("Bob unvets amulet > 0.1.19") {
+    amuletVersion should not be minimumAmuletVersion.toString
+    clue(s"Bob unvets amulet > $minimumAmuletVersion") {
       bobValidatorBackend.validatorAutomation
         .trigger[ValidatorPackageVettingTrigger]
         .pause()
         .futureValue
       val packagesToUnvet = DarResources.amulet.others.filter(
-        _.metadata.version > DarResources.amulet_0_1_19.metadata.version
+        _.metadata.version > minimumAmuletVersion
       )
       logger.info(s"Unvetting ${packagesToUnvet.map(d => (d.metadata.version, d.packageId))}")
       bobValidatorBackend.participantClient.topology.vetted_packages.propose_delta(
@@ -232,7 +233,7 @@ class BatchedFeaturedAppActivityMarkerIntegrationTest
               dsoParty
             ) shouldBe empty withClue "FeaturedAppActivityMarkers"
           val events =
-            sv1ScanBackend.getEventHistory(1000, Some(scanCursorBeforeConversion), CompactJson)
+            sv1ScanBackend.getEventHistory(1000, Some(scanCursorBeforeConversion), LedgerApiJson)
           // Note: There may actually be multiple batches in the trigger because we can't easily synchronize on it having ingested all the markers.
           // We don't care all that much about whether the trigger needs to run multiple time for this test.
           val conversionEvents = events.filter {
@@ -271,7 +272,9 @@ class BatchedFeaturedAppActivityMarkerIntegrationTest
       ),
       entries => {
         forExactly(1, entries) { line =>
-          line.message should (include("vettedAmuletVersion = 0.1.19") and include("Processing"))
+          line.message should (include(s"vettedAmuletVersion = $minimumAmuletVersion") and include(
+            "Processing"
+          ))
         }
         forAtLeast(1, entries) { line =>
           line.message should (include(

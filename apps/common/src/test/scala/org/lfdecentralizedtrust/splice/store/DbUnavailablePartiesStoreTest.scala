@@ -47,6 +47,7 @@ class DbUnavailablePartiesStoreTest
       baseDuration,
       maxIgnoreDuration,
       wallClock,
+      Set.empty,
       loggerFactory,
     )
 
@@ -71,6 +72,55 @@ class DbUnavailablePartiesStoreTest
         } yield {
           justBefore should contain theSameElementsAs Seq(userParty(1), userParty(2))
           atExpiry shouldBe empty
+        }
+      }
+
+      "spread the ignore duration of new parties by the configured jitter" in {
+        val parties = (1 to 100).map(userParty)
+        for {
+          store <- DbUnavailablePartiesStore(
+            storeDescriptor.copy(version = 3),
+            storage,
+            baseDuration,
+            NonNegativeFiniteDuration(1.hour),
+            wallClock,
+            Set.empty,
+            loggerFactory,
+            baseJitter = NonNegativeFiniteDuration(10.seconds),
+          )
+          _ <- store.addPartiesAt(parties, atSeconds(0))
+          beforeBase <- store.listPartiesAt(atSeconds(1) - 1)
+          midWindow <- store.listPartiesAt(atSeconds(6))
+          afterMax <- store.listPartiesAt(atSeconds(11))
+        } yield {
+          // every party is ignored for at least the base duration and less than base + jitter
+          beforeBase should contain theSameElementsAs parties
+          afterMax shouldBe empty
+          // with 100 uniform samples in [1s, 11s) the durations are not all on one side of 6s
+          midWindow should not be empty
+          midWindow.size should be < parties.size
+        }
+      }
+
+      "cap the jittered ignore duration of new parties at the maximum" in {
+        val parties = (1 to 50).map(userParty)
+        for {
+          store <- DbUnavailablePartiesStore(
+            storeDescriptor.copy(version = 4),
+            storage,
+            baseDuration,
+            maxIgnoreDuration,
+            wallClock,
+            Set.empty,
+            loggerFactory,
+            baseJitter = NonNegativeFiniteDuration(1.hour),
+          )
+          _ <- store.addPartiesAt(parties, atSeconds(0))
+          beforeMax <- store.listPartiesAt(atSeconds(4) - 1)
+          afterMax <- store.listPartiesAt(atSeconds(4))
+        } yield {
+          beforeMax.size should be > 0
+          afterMax shouldBe empty
         }
       }
 
@@ -313,6 +363,37 @@ class DbUnavailablePartiesStoreTest
         } yield {
           parties1 should contain theSameElementsAs Seq(userParty(1))
           parties2 shouldBe empty
+        }
+      }
+    }
+
+    "userVersion" should {
+
+      "start with an empty store when the userVersion is bumped, and keep the old data" in {
+        val bumped = storeDescriptor.copy(userVersion = Some(1L))
+        for {
+          oldStore <- mkStore(storeDescriptor)
+          _ <- oldStore.addPartiesAt(Seq(userParty(1), userParty(2)), atSeconds(0))
+          newStore <- mkStore(bumped)
+          newParties <- newStore.listPartiesAt(atSeconds(0))
+          oldParties <- oldStore.listPartiesAt(atSeconds(0))
+        } yield {
+          newStore.storeId should not be oldStore.storeId
+          newParties shouldBe empty
+          oldParties should contain theSameElementsAs Seq(userParty(1), userParty(2))
+        }
+      }
+
+      "resolve to the same store for the same userVersion" in {
+        val bumped = storeDescriptor.copy(userVersion = Some(1L))
+        for {
+          store1 <- mkStore(bumped)
+          _ <- store1.addPartiesAt(Seq(userParty(1)), atSeconds(0))
+          store2 <- mkStore(bumped)
+          parties <- store2.listPartiesAt(atSeconds(0))
+        } yield {
+          store2.storeId shouldBe store1.storeId
+          parties should contain theSameElementsAs Seq(userParty(1))
         }
       }
     }

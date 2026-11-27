@@ -79,7 +79,7 @@ export async function installValidator1(
       true
     ));
   const validatorDbName = `validator1`;
-
+  const nodeIdentifier = 'validator1';
   const participantDependsOn: CnInput<pulumi.Resource>[] = imagePullDeps.concat(loopback);
 
   checkValidatorKeyDownloadForPeriodicBackups('validator1', validator1Config, backupConfig);
@@ -87,9 +87,12 @@ export async function installValidator1(
     validator1Config,
     xns,
     auth0Client.getCfg(),
+    nodeIdentifier,
+    !participantBootstrapDump,
     validator1Config?.disableAuth,
     decentralizedSynchronizerMigrationConfig.active.version,
     defaultPostgres,
+    [],
     {
       dependsOn: participantDependsOn,
     }
@@ -127,12 +130,15 @@ export async function installValidator1(
     auth0Client: auth0Client,
     auth0ValidatorAppName: 'validator1',
     autoAcceptTransfers: autoAcceptTransfers,
-    nodeIdentifier: 'validator1',
+    nodeIdentifier,
     participantPruningConfig,
     deduplicationDuration: validator1Config?.deduplicationDuration,
     disableAuth: validator1Config?.disableAuth,
     version: activeVersion,
     additionalEnvVars: validator1Config?.validatorApp?.additionalEnvVars,
+    participant: {
+      disableParticipantAdminApiAuth: validator1Config?.participant?.disableParticipantAdminApiAuth,
+    },
   });
   const walletGatewayConfig = validator1Config.walletGateway;
   if (walletGatewayConfig.enabled) {

@@ -15,6 +15,7 @@ import org.lfdecentralizedtrust.splice.codegen.java.splice.dsorules.{
   DsoRules_ConfirmSvOnboarding,
   DsoRules_SetConfig,
 }
+import org.lfdecentralizedtrust.splice.config.ConfigTransforms
 import org.lfdecentralizedtrust.splice.console.AppBackendReference
 import org.lfdecentralizedtrust.splice.sv.automation.confirmation.SvOnboardingRequestTrigger
 import org.lfdecentralizedtrust.splice.codegen.java.splice.dsorules
@@ -33,6 +34,15 @@ class SvTimeBasedOnboardingIntegrationTest
     with TriggerTestUtil {
 
   override protected def runEventHistorySanityCheck: Boolean = false
+
+  override def environmentDefinition: SpliceEnvironmentDefinition =
+    baseEnvironmentDefinition
+      .addConfigTransforms((_, config) =>
+        ConfigTransforms.updateAllScanAppConfigs_(
+          // more days than default runway days are advanced
+          _.copy(updateHistoryPartitionRunwayDays = 90)
+        )(config)
+      )
 
   "expire stale `SvOnboardingRequest`, `SvOnboardingConfirmed`,`ValidatorOnboarding` and `VoteRequest` contracts" in {
     implicit env =>
@@ -68,8 +78,9 @@ class SvTimeBasedOnboardingIntegrationTest
           sv4Backend.start()
         }
         clue("An `SvOnboardingRequest` contract is created") {
-          // Increased timeout, because SV4 takes a while to start up
-          eventually(timeUntilSuccess = 60.seconds)(
+          // Increased timeout, because SV4 uploads about 65 DARs during init,
+          // which took about 60 s on a slow runner
+          eventually(timeUntilSuccess = 90.seconds)(
             // The onboarding is requested by SV4 during SvApp init.
             sv1Backend.participantClientWithAdminToken.ledger_api_extensions.acs
               .filterJava(splice.svonboarding.SvOnboardingRequest.COMPANION)(

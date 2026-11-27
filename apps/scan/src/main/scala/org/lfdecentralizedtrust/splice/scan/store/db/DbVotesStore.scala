@@ -4,6 +4,7 @@
 package org.lfdecentralizedtrust.splice.scan.store.db
 
 import cats.data.NonEmptyList
+import cats.syntax.either.*
 import com.daml.ledger.javaapi.data.{ExercisedEvent, Transaction}
 import com.digitalasset.canton.config.CantonRequireTypes.{String2066, String256M}
 import com.digitalasset.canton.data.CantonTimestamp
@@ -31,23 +32,29 @@ import org.lfdecentralizedtrust.splice.codegen.java.splice.dsorules.{
 import org.lfdecentralizedtrust.splice.store.db.{AcsJdbcTypes, DbKeyValueStore}
 import org.lfdecentralizedtrust.splice.store.db.TxLogQueries.TxLogStoreId
 import org.lfdecentralizedtrust.splice.scan.store.ScanKeyValueProvider
+import org.lfdecentralizedtrust.splice.scan.store.votesbackfilling.VotesBackfillingStore
 import org.lfdecentralizedtrust.splice.store.events.DsoRulesCloseVoteRequest
 import org.lfdecentralizedtrust.splice.store.*
 import org.lfdecentralizedtrust.splice.util.FutureUnlessShutdownUtil.futureUnlessShutdownToFuture
 import org.lfdecentralizedtrust.splice.util.Trees
+import slick.dbio.DBIO
 import slick.jdbc.canton.ActionBasedSQLInterpolation.Implicits.actionBasedSQLInterpolationCanton
-import slick.jdbc.{JdbcProfile, PostgresProfile}
+import slick.jdbc.{GetResult, JdbcProfile, PostgresProfile}
+import slick.jdbc.canton.SQLActionBuilder
 
 import scala.concurrent.{ExecutionContext, Future}
+import java.nio.charset.StandardCharsets
 import java.time.Instant
+import java.util.Base64
 import scala.util.{Failure, Success, Try}
 import scala.jdk.CollectionConverters.*
 import scala.jdk.OptionConverters.*
 
 /** Historical vote results (exercised DsoRules_CloseVoteRequest choices).
   *
-  * Owns table `votes_store_results`, and the key `votes_store_first_ingested_record_time_<storeId>`
-  * in the key value store.
+  * Owns table `votes_store_results`, and the keys `votes_store_first_ingested_record_time_<storeId>`,
+  * `votes_store_backfill_cursor_<storeId>` and `votes_store_backfill_complete_<storeId>` in the
+  * key value store.
   */
 class DbVotesStore private (
     storage: DbStorage,
@@ -57,6 +64,7 @@ class DbVotesStore private (
 )(implicit ec: ExecutionContext, closeContext: CloseContext)
     extends AcsJdbcTypes
     with HistoricalVotesStore
+    with VotesBackfillingStore
     with LimitHelpers
     with NamedLogging {
 
@@ -70,12 +78,74 @@ class DbVotesStore private (
   /** The record time of the first transaction that the ingestion of this store has seen.
     * Vote results from before that time have to be backfilled.
     */
-  def getFirstIngestedRecordTime()(implicit tc: TraceContext): Future[Option[CantonTimestamp]] = {
-    import ScanKeyValueProvider.timestampCodec
+  override def getFirstIngestedRecordTime()(implicit
+      tc: TraceContext
+  ): Future[Option[CantonTimestamp]] = {
+    import org.lfdecentralizedtrust.splice.store.KeyValueStore.timestampCodec
     kvStore
       .readValueAndLogOnDecodingFailure[CantonTimestamp](firstIngestedRecordTimeKey(storeId))
       .value
   }
+
+  /** Where [[VotesStoreBackfilling]] should resume from, or `None` if it has not started yet. */
+  override def getBackfillingCursor()(implicit
+      tc: TraceContext
+  ): Future[Option[VotesBackfillCursor]] = {
+    import ScanKeyValueProvider.votesBackfillCursorCodec
+    kvStore
+      .readValueAndLogOnDecodingFailure[VotesBackfillCursor](backfillCursorKey(storeId))
+      .value
+  }
+
+  override def isBackfillingComplete()(implicit tc: TraceContext): Future[Boolean] =
+    kvStore
+      .readValueAndLogOnDecodingFailure[Boolean](backfillCompleteKey(storeId))
+      .value
+      .map(_.getOrElse(false))
+
+  override def markBackfillingComplete()(implicit tc: TraceContext): Future[Unit] =
+    kvStore.setValue(backfillCompleteKey(storeId), true).map { _ =>
+      logger.info("DbVotesStore backfilling is complete")
+    }
+
+  /** Inserts vote results backfilled from a peer scan's `votes_store_results`, and persists
+    * `cursor` in the same transaction, so that backfilling never inserts the same page twice.
+    */
+  override def insertPeerVoteResults(
+      rows: Seq[PeerVoteResult],
+      cursor: VotesBackfillCursor,
+  )(implicit tc: TraceContext): Future[Unit] = {
+    import ScanKeyValueProvider.votesBackfillCursorCodec
+    import profile.api.jdbcActionExtensionMethods
+    storage
+      .queryAndUpdate(
+        DBIO
+          .seq(rows.map(_.toInsert(storeId).action)*)
+          .andThen(kvStore.setValueAction(backfillCursorKey(storeId), cursor))
+          .transactionally,
+        "DbVotesStore.insertPeerVoteResults",
+      )
+      .map(_ => ())
+  }
+
+  /** Serves [[VotesStoreBackfilling]] running on a peer: a page of this store's own rows, strictly
+    * before `before`, ordered backwards by `(record_time, event_number)`.
+    *
+    * Deliberately does not use `row_id`: it is a local identity column, not comparable across scans.
+    */
+  def listBackfillPage(
+      before: VotesBackfillCursor,
+      limit: PageLimit,
+  )(implicit tc: TraceContext): Future[Seq[ServedVoteResult]] =
+    storage.query(
+      sql"""select record_time, synchronizer_id, update_id, event_number, contract_id, choice_result
+            from #$table
+            where store_id = $storeId
+              and (record_time, event_number) < (${before.recordTime.toMicros}, ${before.eventNumber})
+            order by record_time desc, event_number desc
+            limit ${sqlLimit(limit)}""".as[ServedVoteResult],
+      "DbVotesStore.listBackfillPage",
+    )
 
   override def listVoteRequestResults(
       filters: VoteResultsFilters,
@@ -83,55 +153,92 @@ class DbVotesStore private (
       after: Option[Long],
   )(implicit tc: TraceContext): Future[ResultsPage[DsoRules_CloseVoteRequestResult]] =
     for {
-      // The page token is a row_id, which is only used to look up the position in the sort order.
-      where <- Future.fromTry(Try {
-        val afterCond = after.map(a => sql"""(#$sortKey, record_time, event_number) <
+      parsed <- Future.fromTry(Try(Filters.tryParse(filters)))
+      // The page token of /v0/admin/sv/voteresults is a number, so this uses the row_id,
+      // which is only used to look up the position in the sort order.
+      rows <- queryVoteResults(
+        "listVoteRequestResults",
+        parsed,
+        limit,
+        after.map(a => sql"""(#$sortKey, record_time, event_number) <
           (select #$sortKey, record_time, event_number
-           from #$table where store_id = $storeId and row_id = $a)""")
-        and(filterConditions(storeId, filters) ++ afterCond.toList.map(toSQLActionBuilderChain))
-      })
-      rows <- futureUnlessShutdownToFuture(
-        storage.query(
-          (sql"select row_id, choice_result from #$table where " ++ where ++
-            sql" order by #$sortKey desc, record_time desc, event_number desc limit ${sqlLimit(limit)}").toActionBuilder
-            .as[(Long, String)],
-          "DbVotesStore.listVoteRequestResults",
-        )
+           from #$table where store_id = $storeId and row_id = $a)"""),
       )
-      limited = applyLimit("listVoteRequestResults", limit, rows)
     } yield ResultsPage(
-      limited.map { case (_, json) => DsoRules_CloseVoteRequestResult.fromJson(json) },
-      limited.lastOption.map(_._1),
+      rows.map(row => DsoRules_CloseVoteRequestResult.fromJson(row.result.choiceResult)),
+      rows.lastOption.map(_.rowId),
     )
+
+  /** Like [[listVoteRequestResults]], with the data that identifies each vote result,
+    * and the JSON of each result as stored, without decoding it.
+    *
+    * Unlike the `row_id` of [[listVoteRequestResults]], the page token is derived from the data,
+    * so it is the same on all scans, and stays valid if the table is rebuilt.
+    */
+  def listVoteResults(
+      filters: Filters,
+      limit: Limit,
+      after: Option[VoteResultsPageToken],
+  )(implicit tc: TraceContext): Future[VoteResultsPage] =
+    queryVoteResults(
+      "listVoteResults",
+      filters,
+      limit,
+      after.map(a => sql"""(#$sortKey, record_time, event_number) <
+        (${a.sortKey.toMicros}, ${a.recordTime.toMicros}, ${a.eventNumber})"""),
+    ).map { rows =>
+      VoteResultsPage(rows.map(_.result), rows.lastOption.map(_.pageToken))
+    }
+
+  private def queryVoteResults(
+      operation: String,
+      filters: Filters,
+      limit: Limit,
+      afterCond: Option[SQLActionBuilder],
+  )(implicit tc: TraceContext): Future[Seq[VoteResultRow]] = {
+    val where =
+      and(filterConditions(storeId, filters) ++ afterCond.toList.map(toSQLActionBuilderChain))
+    futureUnlessShutdownToFuture(
+      storage.query(
+        (sql"""select row_id, #$sortKey,
+                   record_time, synchronizer_id, update_id, event_number, contract_id, choice_result
+                 from #$table where """ ++ where ++
+          sql" order by #$sortKey desc, record_time desc, event_number desc limit ${sqlLimit(limit)}").toActionBuilder
+          .as[(Long, Long, ServedVoteResult)],
+        s"DbVotesStore.$operation",
+      )
+    )
+      .map(rows =>
+        applyLimit(operation, limit, rows).map { case (rowId, sortKey, result) =>
+          VoteResultRow(
+            rowId,
+            VoteResultsPageToken(
+              CantonTimestamp.assertFromLong(sortKey),
+              result.recordTime,
+              result.eventNumber,
+            ),
+            result,
+          )
+        }
+      )
+  }
 
   override def countVoteRequestResults(filters: VoteResultsFilters)(implicit
       tc: TraceContext
-  ): Future[Long] = {
-    for {
-      where <- Future.fromTry(Try(and(filterConditions(storeId, filters))))
-      count <- futureUnlessShutdownToFuture(
-        storage.query(
-          (sql"select count(*) from #$table where " ++ where).toActionBuilder
-            .as[Long]
-            .head,
-          "DbVotesStore.countVoteRequestResults",
-        )
-      )
-    } yield {
-      count
-    }
-  }
+  ): Future[Long] =
+    Future.fromTry(Try(Filters.tryParse(filters))).flatMap(countVoteResults)
 
-  /** Fails with INVALID_ARGUMENT (HTTP 400) if the date cannot be parsed. */
-  private def parseMicros(field: String, s: String): Long =
-    Try(Instant.parse(s)).toOption
-      .flatMap(CantonTimestamp.fromInstant(_).toOption)
-      .getOrElse(
-        throw Status.INVALID_ARGUMENT
-          .withDescription(s"Invalid $field: '$s' is not an ISO-8601 instant")
-          .asRuntimeException()
+  def countVoteResults(filters: Filters)(implicit tc: TraceContext): Future[Long] =
+    futureUnlessShutdownToFuture(
+      storage.query(
+        (sql"select count(*) from #$table where " ++ and(
+          filterConditions(storeId, filters)
+        )).toActionBuilder
+          .as[Long]
+          .head,
+        "DbVotesStore.countVoteResults",
       )
-      .toMicros
+    )
 
   private def and(conds: NonEmptyList[SQLActionBuilderChain]) =
     conds.reduceLeft((a, b) => (a ++ sql" and " ++ b).toActionBuilder)
@@ -140,17 +247,14 @@ class DbVotesStore private (
   // so it stays small (thousands of rows) and is scanned. Only the sort order is index-backed.
   private def filterConditions(
       storeId: Int,
-      f: VoteResultsFilters,
+      f: Filters,
   ): NonEmptyList[SQLActionBuilderChain] = NonEmptyList(
     toSQLActionBuilderChain(sql"store_id = $storeId"),
     List(
       f.actionName.map(n => sql"vote_action_name like ${lengthLimited(s"%$n%")}"),
       f.accepted.map(a => sql"vote_accepted = $a"),
       f.requester.map(r => sql"vote_requester_name like ${lengthLimited(s"%$r%")}"),
-      (
-        f.effectiveFrom.map(parseMicros("effective_from", _)),
-        f.effectiveTo.map(parseMicros("effective_to", _)),
-      ) match {
+      (f.effectiveFrom.map(_.toMicros), f.effectiveTo.map(_.toMicros)) match {
         case (Some(from), Some(to)) => Some(sql"vote_effective_at between $from and $to")
         case (Some(from), None) => Some(sql"vote_effective_at >= $from")
         case (None, Some(to)) => Some(sql"vote_effective_at <= $to")
@@ -223,6 +327,237 @@ object DbVotesStore {
   // making assumptions about it never changing.
   def firstIngestedRecordTimeKey(storeId: Int): String =
     s"votes_store_first_ingested_record_time_$storeId"
+  def backfillCursorKey(storeId: Int): String =
+    s"votes_store_backfill_cursor_$storeId"
+  def backfillCompleteKey(storeId: Int): String =
+    s"votes_store_backfill_complete_$storeId"
+
+  /** Where [[VotesStoreBackfilling]] should resume: everything at `(recordTime, eventNumber)` or
+    * later is already in `votes_store_results`; backfilling continues strictly before it.
+    */
+  final case class VotesBackfillCursor(recordTime: CantonTimestamp, eventNumber: Int)
+
+  /** The position of a vote result in the order of [[DbVotesStore.listVoteResults]]:
+    * its effective date (or completion date if it has none), record time and event number.
+    * Served to API users as an opaque string.
+    */
+  final case class VoteResultsPageToken(
+      sortKey: CantonTimestamp,
+      recordTime: CantonTimestamp,
+      eventNumber: Int,
+  ) {
+    def encodeToBase64: String =
+      Base64.getUrlEncoder.encodeToString(
+        io.circe.Json
+          .obj(
+            "effective_at" -> io.circe.Json.fromLong(sortKey.toMicros),
+            "record_time" -> io.circe.Json.fromLong(recordTime.toMicros),
+            "event_number" -> io.circe.Json.fromInt(eventNumber),
+          )
+          .noSpaces
+          .getBytes(StandardCharsets.UTF_8)
+      )
+  }
+
+  object VoteResultsPageToken {
+    def tryDecodeFromBase64(token: String): VoteResultsPageToken =
+      (for {
+        json <- Try(new String(Base64.getUrlDecoder.decode(token), StandardCharsets.UTF_8)).toEither
+        decoded <- io.circe.parser.decode(json)(decoder)
+      } yield decoded).valueOr(err =>
+        throw Status.INVALID_ARGUMENT
+          .withDescription(s"Invalid page token: ${err.getMessage}")
+          .asRuntimeException()
+      )
+
+    private val decoder: io.circe.Decoder[VoteResultsPageToken] = c =>
+      for {
+        sortKey <- c.downField("effective_at").as[Long]
+        recordTime <- c.downField("record_time").as[Long]
+        eventNumber <- c.downField("event_number").as[Int]
+        token <- Either
+          .catchNonFatal(
+            VoteResultsPageToken(
+              CantonTimestamp.assertFromLong(sortKey),
+              CantonTimestamp.assertFromLong(recordTime),
+              eventNumber,
+            )
+          )
+          .leftMap(e => io.circe.DecodingFailure(e.getMessage, c.history))
+      } yield token
+  }
+
+  /** Like [[VoteResultsFilters]], with the dates parsed. */
+  final case class Filters(
+      actionName: Option[String] = None,
+      accepted: Option[Boolean] = None,
+      requester: Option[String] = None,
+      effectiveFrom: Option[CantonTimestamp] = None,
+      effectiveTo: Option[CantonTimestamp] = None,
+  )
+
+  object Filters {
+
+    /** Fails with INVALID_ARGUMENT (HTTP 400) if a date cannot be parsed. */
+    def tryParse(filters: VoteResultsFilters): Filters =
+      Filters(
+        actionName = filters.actionName,
+        accepted = filters.accepted,
+        requester = filters.requester,
+        effectiveFrom = filters.effectiveFrom.map(tryParseTimestamp("effective_from", _)),
+        effectiveTo = filters.effectiveTo.map(tryParseTimestamp("effective_to", _)),
+      )
+
+    /** Fails with INVALID_ARGUMENT (HTTP 400) if the instant is out of range. */
+    def tryTimestamp(field: String, instant: Instant): CantonTimestamp =
+      CantonTimestamp
+        .fromInstant(instant)
+        .valueOr(_ =>
+          throw Status.INVALID_ARGUMENT
+            .withDescription(s"Invalid $field: $instant is out of range")
+            .asRuntimeException()
+        )
+
+    private def tryParseTimestamp(field: String, s: String): CantonTimestamp =
+      tryTimestamp(
+        field,
+        Try(Instant.parse(s)).getOrElse(
+          throw Status.INVALID_ARGUMENT
+            .withDescription(s"Invalid $field: '$s' is not an ISO-8601 instant")
+            .asRuntimeException()
+        ),
+      )
+  }
+
+  final case class VoteResultsPage(
+      resultsInPage: Seq[ServedVoteResult],
+      nextPageToken: Option[VoteResultsPageToken],
+  )
+
+  private final case class VoteResultRow(
+      rowId: Long,
+      pageToken: VoteResultsPageToken,
+      result: ServedVoteResult,
+  )
+
+  /** A vote result as served to a peer or to API users: what identifies it, and the JSON of its result as stored.
+    * Everything else in `votes_store_results` is derived from the result by the receiver, see
+    * [[PeerVoteResult]]. The JSON is passed on as stored, without decoding it.
+    */
+  final case class ServedVoteResult(
+      recordTime: CantonTimestamp,
+      synchronizerId: String,
+      updateId: String,
+      eventNumber: Int,
+      // Only empty for rows that the migration adding the column could not fill, see #8157.
+      contractId: Option[String],
+      choiceResult: String,
+  )
+
+  implicit private val getResultServedVoteResult: GetResult[ServedVoteResult] = GetResult { prs =>
+    import prs.*
+    ServedVoteResult(
+      recordTime = CantonTimestamp.ofEpochMicro(<<[Long]),
+      synchronizerId = <<[String],
+      updateId = <<[String],
+      eventNumber = <<[Int],
+      contractId = <<[Option[String]],
+      choiceResult = <<[String],
+    )
+  }
+
+  /** A vote result backfilled from a peer scan or from the local update history. Like for the votes that are ingested, all columns
+    * of `votes_store_results` are derived from the result.
+    */
+  final case class PeerVoteResult(
+      recordTime: CantonTimestamp,
+      synchronizerId: String,
+      updateId: String,
+      eventNumber: Int,
+      contractId: String,
+      result: DsoRules_CloseVoteRequestResult,
+  ) {
+    def toInsert(storeId: Int): InsertVoteResult =
+      DbVotesStore.toInsert(
+        result,
+        contractId,
+        storeId,
+        recordTime.toMicros,
+        synchronizerId,
+        updateId,
+        eventNumber,
+      )
+  }
+
+  /** A vote result as received from a peer scan, with the JSON of its result as the peer stored it.
+    * BFT reads compare these, so that agreeing on a page does not depend on this app being able to
+    * decode it.
+    */
+  final case class EncodedPeerVoteResult(
+      recordTime: CantonTimestamp,
+      synchronizerId: String,
+      updateId: String,
+      eventNumber: Int,
+      contractId: String,
+      choiceResult: String,
+  ) {
+
+    /** Throws [[UndecodablePeerVoteResult]] if the result cannot be decoded, e.g., because it is from
+      * a newer Daml model. Unlike for ingestion, which would block the whole ACS store, this does not
+      * store a placeholder: the peer has the actual vote, and a placeholder would lose it for good.
+      * Backfilling stops until the app is updated.
+      */
+    def decode: PeerVoteResult =
+      Try(DsoRules_CloseVoteRequestResult.fromJson(choiceResult)) match {
+        case Success(result) =>
+          PeerVoteResult(recordTime, synchronizerId, updateId, eventNumber, contractId, result)
+        case Failure(e) => throw new UndecodablePeerVoteResult(updateId, recordTime, e)
+      }
+  }
+
+  /** The vote results in a transaction of the local update history, for backfilling them from there.
+    * The same vote results as [[parseTransaction]] returns for the transaction, but like for the ones
+    * backfilled from a peer, a result that cannot be decoded is not replaced by a placeholder.
+    *
+    * Throws [[UndecodablePeerVoteResult]] if a result cannot be decoded.
+    */
+  def backfilledVoteResults(
+      tx: Transaction
+  )(implicit elc: ErrorLoggingContext): Seq[PeerVoteResult] = {
+    val mapping = Trees.getLocalEventIndices(tx)
+    val recordTime = CantonTimestamp.assertFromInstant(tx.getRecordTime)
+    tx.getEventsById.asScala.iterator.flatMap {
+      case (nodeId, exercised: ExercisedEvent) =>
+        Try(exercised match {
+          case DsoRulesCloseVoteRequest(node) =>
+            Some(
+              PeerVoteResult(
+                recordTime,
+                tx.getSynchronizerId,
+                tx.getUpdateId,
+                mapping(nodeId).intValue,
+                exercised.getContractId,
+                node.result.value,
+              )
+            )
+          case _ => None
+        }) match {
+          case Success(result) => result
+          case Failure(e) => throw new UndecodablePeerVoteResult(tx.getUpdateId, recordTime, e)
+        }
+      case _ => None
+    }.toSeq
+  }
+
+  final class UndecodablePeerVoteResult(
+      updateId: String,
+      recordTime: CantonTimestamp,
+      cause: Throwable,
+  ) extends IllegalArgumentException(
+        s"Failed to decode the vote result in update $updateId at record time $recordTime " +
+          "that is being backfilled, this app might be too old",
+        cause,
+      )
 
   /** Records the record time of the first transaction that the ingestion has seen, unless it is already set.
     * Runs in the same SQL transaction as the ingestion of the votes, so the value is recorded if and only if
@@ -233,7 +568,7 @@ object DbVotesStore {
       storeId: Int,
       recordTime: CantonTimestamp,
   ) extends PreparedIngestionAction {
-    import ScanKeyValueProvider.timestampCodec
+    import org.lfdecentralizedtrust.splice.store.KeyValueStore.timestampCodec
 
     override def action =
       kvStore.setValueIfNotExistsAction(firstIngestedRecordTimeKey(storeId), recordTime)
@@ -325,7 +660,8 @@ object DbVotesStore {
                     exercised.getContractId,
                     storeId,
                     recordTime,
-                    tx,
+                    tx.getSynchronizerId,
+                    tx.getUpdateId,
                     eventNumber,
                   )
                 )
@@ -346,7 +682,8 @@ object DbVotesStore {
                     exercised.getContractId,
                     storeId,
                     recordTime,
-                    tx,
+                    tx.getSynchronizerId,
+                    tx.getUpdateId,
                     eventNumber,
                   ).copy(error = Some(e.getMessage.take(MaxErrorLength)))
                 )
@@ -363,15 +700,16 @@ object DbVotesStore {
       contractId: String,
       storeId: Int,
       recordTime: Long,
-      tx: Transaction,
+      synchronizerId: String,
+      updateId: String,
       eventNumber: Int,
   ): InsertVoteResult = {
     val outcome = VoteRequestOutcome.parse(result.outcome)
     InsertVoteResult(
       storeId = storeId,
       recordTime = recordTime,
-      synchronizerId = String2066.tryCreate(tx.getSynchronizerId),
-      updateId = String2066.tryCreate(tx.getUpdateId),
+      synchronizerId = String2066.tryCreate(synchronizerId),
+      updateId = String2066.tryCreate(updateId),
       eventNumber = eventNumber,
       contractId = String2066.tryCreate(contractId),
       voteActionName = String2066.tryCreate(actionName(result.request.action)),

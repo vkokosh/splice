@@ -116,6 +116,54 @@ spec:
         - name: ADDITIONAL_CONFIG_HTTP_HEALTH_SERVER
           value: canton.participants.participant.monitoring.http-health-server.port = 5071
         {{- end }}
+        - name: CANTON_PARTICIPANT_IDENTIFIER
+          value: {{ .Values.nodeIdentifier | quote }}
+        {{- if not .Values.enableAutoInit }}
+        # `identity = null` first: Canton merges config files, so without it the
+        # auto-init `identity.identifier` would survive and be rejected.
+        - name: ADDITIONAL_CONFIG_MANUAL_INIT
+          value: |
+            canton.participants.participant.init.identity = null
+            canton.participants.participant.init.identity = { type = manual }
+            canton.participants.participant.init.generate-topology-transactions-and-keys = false
+        {{- end }}
+        # TODO(DACH-NY/canton-network-internal#8256): change this condition to .Values.disableAuth and remove .Values.adminApi.disableAuth once we're ready to enable admin API auth by default
+        {{- if .Values.adminApi.disableAuth }}
+        - name: ADDITIONAL_CONFIG_DISABLE_ADMIN_API_AUTH
+          value: canton.participants.participant.admin-api.auth-services=[]
+        {{- else}}
+        - name: SPLICE_PARTICIPANT_ADMIN_API_JWKS_URL
+          value: {{ .Values.adminApi.auth.jwksUrl }}
+        - name: SPLICE_PARTICIPANT_ADMIN_API_TARGET_AUDIENCE
+          value: {{ .Values.adminApi.auth.targetAudience }}
+        - name: SPLICE_PARTICIPANT_ADMIN_API_USER
+          value: {{ .Values.adminApi.auth.user }}
+        - name: ADDITIONAL_CONFIG_ADMIN_API_USERS
+          value: |
+            {{- range .Values.adminApi.auth.additionalUsers }}
+            _admin_api_users += {
+              user-id = "{{ . }}"
+              allowed-services = ${_default_admin_api_user_allowed_services}
+            }
+            {{- end }}
+        {{- end}}
+        {{- if and (not .Values.adminApi.disableAuth) .Values.enableTopologyKeyMonitorAccess }}
+        - name: ADDITIONAL_CONFIG_TOPOLOGY_KEY_MONITOR_ACCESS
+          value: |
+            canton.participants.participant.admin-api.auth-services += {
+              type = jwt-rs-256-crt
+              certificate = "/app/topology-key-monitor-access/publicKey"
+              target-audience = "topology-key-monitor-admin-api"
+              users = [{
+                user-id = "topology-key-monitor"
+                allowed-services = [
+                  "com.digitalasset.canton.topology.admin.v30.TopologyManagerReadService",
+                  "com.digitalasset.canton.admin.participant.v30.SynchronizerConnectivityService",
+                  "com.digitalasset.canton.connection.v30.ApiInfoService"
+                ]
+              }]
+            }
+        {{- end }}
         {{- include "splice-util-lib.additional-env-vars" .Values.additionalEnvVars | indent 8}}
         {{- include "splice-util-lib.log-level" .Values | indent 8}}
         ports:
@@ -182,6 +230,11 @@ spec:
         {{- if .Values.pvc }}
           - name: participant-volume
             mountPath: /persistent-data
+        {{- end }}
+        {{- if and (not .Values.adminApi.disableAuth) .Values.enableTopologyKeyMonitorAccess }}
+          - name: topology-key-monitor-access
+            mountPath: /app/topology-key-monitor-access
+            readOnly: true
         {{- end }}
       {{- if or (.Values.persistence.enablePgInitContainer) (.Values.extraInitContainers) }}
       initContainers:
@@ -280,6 +333,11 @@ spec:
         - name: participant-volume
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-participant-pvc
+        {{- end }}
+        {{- if and (not .Values.adminApi.disableAuth) .Values.enableTopologyKeyMonitorAccess }}
+        - name: topology-key-monitor-access
+          configMap:
+            name: topology-key-monitor-admin-api-token-public-key
         {{- end }}
 ---
 {{-  if .Values.pvc }}

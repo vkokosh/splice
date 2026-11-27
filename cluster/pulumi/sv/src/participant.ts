@@ -9,7 +9,9 @@ import {
   DomainMigrationIndex,
   ExactNamespace,
   getAdditionalJvmOptions,
+  getClientId,
   getLedgerApiAudience,
+  getParticipantAdminApiAudience,
   getParticipantKmsHelmResources,
   InstalledHelmChart,
   installSpliceHelmChart,
@@ -49,6 +51,9 @@ export type ParticipantArgs = {
   disableProtection?: boolean;
   participantAdminUserNameFrom?: k8s.types.input.core.v1.EnvVarSource;
   imagePullServiceAccountName?: string;
+  nodeIdentifier: string;
+  enableAutoInit: boolean;
+  enableTopologyKeyMonitorAccess?: boolean;
 };
 
 export type ParticipantOutput = {
@@ -85,11 +90,15 @@ function installParticipantChart(
     auth0,
     participantAdminUserNameFrom,
     imagePullServiceAccountName,
+    nodeIdentifier,
+    enableAutoInit,
+    enableTopologyKeyMonitorAccess,
   }: ParticipantArgs,
   db: Postgres,
   customOptions?: SpliceCustomResourceOptions
 ): InstalledHelmChart {
   const defaultValues: ChartValues = loadDefaultParticipantValues(
+    xns,
     auth0,
     DecentralizedSynchronizerUpgradeConfig.activeMigrationId
   );
@@ -108,10 +117,14 @@ function installParticipantChart(
       // the following will not be needed when the MIGRATION_ID gets removed from defaults
       databaseName: `participant_${DecentralizedSynchronizerUpgradeConfig.frozenMigrationId}`,
     },
-    auth: {
-      ...defaultValues.auth,
-      targetAudience: getLedgerApiAudience(auth0, xns.logicalName),
-      jwksUrl: `https://${auth0.auth0Domain}/.well-known/jwks.json`,
+    adminApi: {
+      ...defaultValues.adminApi,
+      // TODO(DACH-NY/canton-network-internal#8256): remove this once we remove the separate admin API auth flag
+      disableAuth: participant?.disableParticipantAdminApiAuth ?? false,
+      auth: {
+        ...defaultValues.adminApi?.auth,
+        additionalUsers: [`${getClientId(auth0, 'sv', xns.logicalName)}@clients`],
+      },
     },
     ...kmsValues,
     additionalEnvVars: [
@@ -130,7 +143,10 @@ function installParticipantChart(
     enableKeyDownload: svParticipantKeyDownloadEnabled(participant),
     serviceAccountName: imagePullServiceAccountName,
     resources: participant?.resources,
+    nodeIdentifier,
+    enableAutoInit,
     pvc: persistentHeapDumpsPvc(),
+    enableTopologyKeyMonitorAccess,
   };
 
   return installSpliceHelmChart(xns, 'participant', 'splice-participant', values, version, {
@@ -140,6 +156,7 @@ function installParticipantChart(
 }
 
 function loadDefaultParticipantValues(
+  xns: ExactNamespace,
   auth0: Auth0Config,
   migrationId: DomainMigrationIndex
 ): ChartValues {
@@ -148,6 +165,12 @@ function loadDefaultParticipantValues(
     {
       MIGRATION_ID: `${migrationId}`,
       OIDC_AUTHORITY_URL: auth0.auth0Domain,
+      OIDC_AUTHORITY_LEDGER_API_AUDIENCE: getLedgerApiAudience(auth0, xns.logicalName),
+      OIDC_AUTHORITY_PARTICIPANT_ADMIN_API_AUDIENCE: getParticipantAdminApiAudience(
+        auth0,
+        xns.logicalName
+      ),
+      VALIDATOR_CLIENT_ID: getClientId(auth0, 'validator', xns.logicalName),
     }
   );
 }

@@ -69,8 +69,9 @@ import org.lfdecentralizedtrust.splice.sv.util.{SvOnboardingToken, SvUtil}
 import org.lfdecentralizedtrust.splice.util.{Contract, PackageVetting, TemplateJsonDecoder}
 
 import java.security.interfaces.ECPrivateKey
-import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future}
+import scala.concurrent.{ExecutionContext, ExecutionContextExecutor, Future, blocking}
 import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
 
 /** Container for the methods required by the SvApp to initialize a joining SV node. */
 class JoiningNodeInitializer(
@@ -200,10 +201,16 @@ class JoiningNodeInitializer(
       )
       decentralizedSynchronizerId = psid.logical
       dsoPartyHosting = newDsoPartyHosting(dsoPartyId)
-      dsoPartyIsAuthorized <- dsoPartyHosting.isDsoPartyAuthorizedOn(
-        decentralizedSynchronizerId,
-        registeredGlobalSync,
-        participantId,
+      dsoPartyIsAuthorized <- retryProvider.retry(
+        RetryFor.WaitingOnInitDependency,
+        "isDsoPartyAuthorizedOn",
+        "Check whether the DSO party is authorized on our participant in joinDsoAndOnboardNodes",
+        dsoPartyHosting.isDsoPartyAuthorizedOn(
+          decentralizedSynchronizerId,
+          registeredGlobalSync,
+          participantId,
+        ),
+        logger,
       )
       _ <-
         // do not reconnect if we host the party, as we can be in some LSU stage and the participant cannot reconnect if the new sync is not functional
@@ -274,6 +281,7 @@ class JoiningNodeInitializer(
           upgradesConfig,
           dsoPartyId,
           dsoPartyHosting,
+          config.onboardingSnapshots,
           retryProvider,
           loggerFactory,
         ),
@@ -282,6 +290,7 @@ class JoiningNodeInitializer(
       dsoAutomation <-
         if (dsoPartyIsAuthorized) {
           logger.info("DSO party is authorized to our participant.")
+          deleteDsoPartySnapshotDownload()
           for {
             _ <- SetupUtil.grantSvUserRightActAsDso(
               connection,
@@ -295,6 +304,7 @@ class JoiningNodeInitializer(
               retryProvider,
               loggerFactory,
               config.scan,
+              packageVersionSupport,
             )
             dsoAutomation <-
               newSvDsoAutomationService(
@@ -410,6 +420,18 @@ class JoiningNodeInitializer(
     }
   }
 
+  private def deleteDsoPartySnapshotDownload(): Unit = {
+    val download = SvOnboardingSnapshotDownload.downloadDirectory(
+      config.onboardingSnapshots,
+      JoiningNodeDsoPartyHosting.SnapshotDownloadName,
+    )
+    try blocking(SvOnboardingSnapshotDownload.deleteDownload(download))
+    catch {
+      case NonFatal(error) =>
+        logger.warn(s"Failed to delete DSO party snapshot download $download", error)
+    }
+  }
+
   private def vetThroughSponsor(joiningConfig: SvOnboardingConfig.JoinWithKey): Future[Unit] = {
     logger.info("Vetting packages based on state from sponsor")
     for {
@@ -427,7 +449,6 @@ class JoiningNodeInitializer(
         participantAdminConnection,
         loggerFactory,
         config.latestPackagesOnly,
-        config.parameters.enabledFeatures.enableUnsupportedDarsUnvetting,
       )
       _ <- vetting.vetCurrentPackages(
         synchronizerId,
@@ -502,6 +523,7 @@ class JoiningNodeInitializer(
             physicalSynchronizerId <-
               currentNode.onboardLocalSequencerIfRequired(
                 svConnection.map(_._2),
+                config.onboardingSnapshots,
                 // Add the new local domain node to the DSO rules with an "onboarding" status
                 // This triggers automation in other SV apps, that's why we make sure the sequencer is known first
                 preInit = () =>
@@ -870,6 +892,7 @@ class JoiningNodeInitializer(
                   retryProvider,
                   loggerFactory,
                   config.scan,
+                  packageVersionSupport,
                 )
                 dsoAutomation <- newSvDsoAutomationService(
                   svStore,
@@ -950,7 +973,6 @@ class JoiningNodeInitializer(
 
     private def startHostingDsoPartyInParticipant(): Future[Unit] = {
       dsoPartyHosting
-        // TODO(DACH-NY/canton-network-node#5364): consider inlining the relevant parts from DsoPartyHosting
         .hostPartyOnOwnParticipant(
           config.domains.global.alias,
           synchronizerId,

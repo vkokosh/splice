@@ -8,6 +8,10 @@ inputs:
     description: "Whether to set up SBT"
     required: false
     default: "true"
+  restore_build_outputs:
+    description: "Whether to restore the frontend node_modules and the Daml artifacts"
+    required: false
+    default: "true"
   save_nix_cache:
     description: "Whether to save the Nix cache"
     required: false
@@ -36,6 +40,13 @@ inputs:
   cache_version:
     description: "Cache version"
     required: true
+  fetch_git_refs:
+    description: |
+      Which git refs to fetch beyond the checked-out commit (see common_setup.sh):
+      none (default), shallow (main and latest release-line tips, depth 1, no blobs) or
+      history (main, PR head branch and latest release line, full commit history without blobs)
+    required: false
+    default: "none"
 
 outputs:
   sbt_cache_hits:
@@ -54,6 +65,8 @@ runs:
     - name: Setup
       shell: bash
       run: ./.github/actions/scripts/common_setup.sh
+      env:
+        FETCH_GIT_REFS: ${{ inputs.fetch_git_refs }}
 
     - name: Report git size
       shell: bash
@@ -75,3 +88,4 @@ runs:
       uses: ./.github/actions/sbt/setup_sbt
       with:
         cache_version: ${{ inputs.cache_version }}
+        restore_build_outputs: ${{ inputs.restore_build_outputs }}

@@ -35,12 +35,10 @@ import org.apache.pekko.http.scaladsl.model.Uri
 import org.lfdecentralizedtrust.splice.admin.http.HttpErrorHandler
 import org.lfdecentralizedtrust.splice.codegen.java.splice.{amulet, ans as ansCodegen}
 import org.lfdecentralizedtrust.splice.codegen.java.splice.amuletrules.AmuletRules
+import org.lfdecentralizedtrust.splice.codegen.java.splice.dsorules.DsoRules_CloseVoteRequestResult
 import org.lfdecentralizedtrust.splice.codegen.java.splice.dso.decentralizedsynchronizer.SynchronizerNodeConfig
 import org.lfdecentralizedtrust.splice.codegen.java.splice.dso.svstate.SvNodeState
-import org.lfdecentralizedtrust.splice.codegen.java.splice.externalpartyamuletrules.{
-  ExternalPartyAmuletRules,
-  TransferCommand,
-}
+import org.lfdecentralizedtrust.splice.codegen.java.splice.externalpartyamuletrules.ExternalPartyAmuletRules
 import org.lfdecentralizedtrust.splice.codegen.java.splice.round.{
   ClosedMiningRound,
   IssuingMiningRound,
@@ -109,7 +107,6 @@ import org.lfdecentralizedtrust.splice.scan.store.{
   AppActivityStore,
   ScanEventStore,
   ScanStore,
-  TxLogEntry,
 }
 import org.lfdecentralizedtrust.splice.scan.store.AppActivityStore.RoundIngestionStatus
 import org.lfdecentralizedtrust.splice.scan.store.bulk.{
@@ -141,7 +138,8 @@ import org.lfdecentralizedtrust.splice.store.UpdateHistory.BackfillingState
 import org.lfdecentralizedtrust.splice.scan.store.db.DbAppActivityRecordStore.AppAndAssetActivityRecordT
 
 import scala.collection.immutable.SortedMap
-import org.lfdecentralizedtrust.splice.scan.store.db.DbScanAppRewardsStore
+import org.lfdecentralizedtrust.splice.scan.store.db.{DbScanAppRewardsStore, DbVotesStore}
+import org.lfdecentralizedtrust.splice.scan.store.db.DbVotesStore.VotesBackfillCursor
 import org.lfdecentralizedtrust.splice.store.db.AcsJdbcTypes.StoreMemberId
 import org.lfdecentralizedtrust.splice.util.{
   Codec,
@@ -179,6 +177,7 @@ class HttpScanHandler(
     snapshotStore: AcsSnapshotStore,
     eventStore: ScanEventStore,
     historicalVotesStore: HistoricalVotesStore,
+    votesStore: DbVotesStore,
     bulkStorage: Option[BulkStorageReader],
     scanApiMetrics: ScanHttpApiMetrics,
     dsoAnsResolver: DsoAnsResolver,
@@ -578,37 +577,6 @@ class HttpScanHandler(
             )
           )
         }
-    }
-  }
-
-  def getAmuletConfigForRound(
-      response: v0.ScanResource.GetAmuletConfigForRoundResponse.type
-  )(
-      round: Long
-  )(extracted: TraceContext): Future[v0.ScanResource.GetAmuletConfigForRoundResponse] = {
-    implicit val tc = extracted
-    withSpan(s"$workflowId.getAmuletConfigForRound") { _ => _ =>
-      store
-        .getAmuletConfigForRound(round)
-        .map { cfg =>
-          val transferFee = cfg.transferFee.getOrElse(throw new RuntimeException("No transfer fee"))
-          v0.ScanResource.GetAmuletConfigForRoundResponse.OK(
-            definitions.GetAmuletConfigForRoundResponse(
-              Codec.encode(cfg.amuletCreateFee),
-              Codec.encode(cfg.holdingFee),
-              Codec.encode(cfg.lockHolderFee),
-              definitions.SteppedRate(
-                Codec.encode(transferFee.initialRate),
-                transferFee.steps
-                  .map((step) =>
-                    definitions.RateStep(Codec.encode(step.from), Codec.encode(step.rate))
-                  )
-                  .toVector,
-              ),
-            )
-          )
-        }
-        .transform(HttpErrorHandler.onGrpcNotFound(s"Round ${round} not found"))
     }
   }
 
@@ -1258,82 +1226,6 @@ class HttpScanHandler(
     }
   }
 
-  override def lookupTransferCommandCounterByParty(
-      respond: ScanResource.LookupTransferCommandCounterByPartyResponse.type
-  )(
-      party: String
-  )(extracted: TraceContext): Future[ScanResource.LookupTransferCommandCounterByPartyResponse] = {
-    implicit val tc = extracted
-    withSpan(s"$workflowId.lookupTransferCommandCounterByParty") { _ => _ =>
-      val partyId = PartyId.tryFromProtoPrimitive(party)
-      store
-        .lookupTransferCommandCounterByParty(
-          partyId
-        )
-        .map {
-          case Some(c) =>
-            v0.ScanResource.LookupTransferCommandCounterByPartyResponse.OK(
-              definitions.LookupTransferCommandCounterByPartyResponse(
-                c.toHttp
-              )
-            )
-          case None =>
-            v0.ScanResource.LookupTransferCommandCounterByPartyResponse.NotFound(
-              definitions.ErrorResponse(
-                s"No TransferCommandCounter found for party: $party, use 0 for the nonce"
-              )
-            )
-        }
-    }
-  }
-
-  override def lookupTransferCommandStatus(
-      respond: ScanResource.LookupTransferCommandStatusResponse.type
-  )(
-      sender: String,
-      nonce: Long,
-  )(extracted: TraceContext): Future[ScanResource.LookupTransferCommandStatusResponse] = {
-    implicit val tc = extracted
-    val senderParty = PartyId.tryFromProtoPrimitive(sender)
-    withSpan(s"$workflowId.lookupTransferCommandStatus") { _ => _ =>
-      for {
-        txLogEntryMap <- store.lookupLatestTransferCommandEvents(
-          senderParty,
-          nonce,
-          HttpScanHandler.MAX_TRANSFER_COMMAND_CONTRACTS,
-        )
-        filteredMap <- MonadUtil
-          .sequentialTraverse(txLogEntryMap.view.toList) { case (cid, entry) =>
-            // The update history ingests independently so this lookup can return None temporarily.
-            // We just filter out those contracts.
-            updateHistory
-              .lookupContractById(TransferCommand.COMPANION)(cid)
-              .map(
-                _.map(c =>
-                  cid.contractId -> definitions.TransferCommandContractWithStatus(
-                    c.toHttp,
-                    TxLogEntry.Http.toResponse(entry.status),
-                  )
-                )
-              )
-          }
-          .map(_.flatten.toMap)
-      } yield {
-        if (filteredMap.isEmpty) {
-          v0.ScanResource.LookupTransferCommandStatusResponseNotFound(
-            definitions.ErrorResponse(
-              s"Couldn't find transfer command for sender $senderParty with nonce $nonce created in the last 24h"
-            )
-          )
-        } else {
-          v0.ScanResource.LookupTransferCommandStatusResponseOK(
-            definitions.LookupTransferCommandStatusResponse(filteredMap)
-          )
-        }
-      }
-    }
-  }
-
   /** Filter the given ACS snapshot to contracts the given party is a stakeholder on */
   // TODO(#828) Move this logic inside a Canton gRPC API.
   private def filterAcsSnapshot(input: ByteString, stakeholder: PartyId): ByteString = {
@@ -1677,15 +1569,22 @@ class HttpScanHandler(
 
   }
 
-  private def toAcsV2Response(migrationId: Long, result: QueryAcsSnapshotResult)(implicit
+  private def toAcsV2Response(
+      migrationId: Long,
+      damlValueEncoding: Option[DamlValueEncoding],
+      result: QueryAcsSnapshotResult,
+  )(implicit
       tc: TraceContext
-  ) =
+  ) = {
+    val encodings = ScanHttpEncodings.fromDamlValueEncoding(
+      damlValueEncoding.getOrElse(DamlValueEncoding.CompactJson)
+    )
     definitions.AcsResponseV2(
       Codec.encode(result.snapshotRecordTime),
       migrationId,
       result.createdEventsInPage
         .map(event =>
-          CompactJsonScanHttpEncodings().javaToHttpActiveContract(
+          encodings.javaToHttpActiveContract(
             event.eventId,
             event.recordTime,
             event.event,
@@ -1693,6 +1592,7 @@ class HttpScanHandler(
         ),
       result.afterToken.map(_.encodeToBase64),
     )
+  }
 
   override def getAcsSnapshotAtV2(respond: ScanResource.GetAcsSnapshotAtV2Response.type)(
       body: AcsRequestV2
@@ -1701,7 +1601,7 @@ class HttpScanHandler(
 
     def toResponse(result: QueryAcsSnapshotResult) = {
       ScanResource.GetAcsSnapshotAtV2ResponseOK(
-        toAcsV2Response(body.migrationId, result)
+        toAcsV2Response(body.migrationId, body.damlValueEncoding, result)
       )
     }
     val opId = "getAcsSnapshotAtV2"
@@ -1774,7 +1674,9 @@ class HttpScanHandler(
   )(extracted: TraceContext): Future[ScanResource.GetHoldingsStateAtV2Response] = {
     implicit val tc: TraceContext = extracted
     def toResponse(result: QueryAcsSnapshotResult) =
-      ScanResource.GetHoldingsStateAtV2ResponseOK(toAcsV2Response(body.migrationId, result))
+      ScanResource.GetHoldingsStateAtV2ResponseOK(
+        toAcsV2Response(body.migrationId, body.damlValueEncoding, result)
+      )
     val opId = "getHoldingsStateAtV2"
     withSpan(s"$workflowId.$opId") { _ => _ =>
       holdingStateQuery(
@@ -2218,22 +2120,127 @@ class HttpScanHandler(
       } yield {
         ScanResource.ListVoteRequestResultsResponse.OK(
           definitions.ListDsoRulesVoteResultsResponse(
-            page.resultsInPage
-              .map(voteResult => {
-                io.circe.parser
-                  .parse(
-                    ApiCodecCompressed
-                      .apiValueToJsValue(Contract.javaValueToLfValue(voteResult.toValue))
-                      .compactPrint
-                  )
-                  .valueOr(err =>
-                    ErrorUtil.invalidState(s"Failed to convert from spray to circe: $err")
-                  )
-              })
-              .toVector,
+            page.resultsInPage.map(encodeVoteResult).toVector,
             page.nextPageToken.map(BigInt(_)),
           )
         )
+      }
+    }
+  }
+
+  private def encodeVoteResult(voteResult: DsoRules_CloseVoteRequestResult)(implicit
+      tc: TraceContext
+  ): io.circe.Json =
+    io.circe.parser
+      .parse(
+        ApiCodecCompressed
+          .apiValueToJsValue(Contract.javaValueToLfValue(voteResult.toValue))
+          .compactPrint
+      )
+      .valueOr(err => ErrorUtil.invalidState(s"Failed to convert from spray to circe: $err"))
+
+  private def voteResultsFiltersV1(
+      filters: definitions.VoteResultsFiltersV1
+  ): DbVotesStore.Filters =
+    DbVotesStore.Filters(
+      actionName = filters.actionName,
+      accepted = filters.accepted,
+      requester = filters.requester,
+      effectiveFrom = filters.effectiveFrom.map(d =>
+        DbVotesStore.Filters.tryTimestamp("effective_from", d.toInstant)
+      ),
+      effectiveTo =
+        filters.effectiveTo.map(d => DbVotesStore.Filters.tryTimestamp("effective_to", d.toInstant)),
+    )
+
+  /** Unlike `/v0/admin/sv/voteresults`, which serves the txlog, the endpoints served from the votes
+    * store return nothing until it holds every vote result since the start of the network.
+    */
+  private def confirmVotesBackfillingIsCompleteThen[T](
+      body: => Future[T]
+  )(implicit tc: TraceContext): Future[T] =
+    votesStore.isBackfillingComplete().flatMap {
+      case true => body
+      case false =>
+        Future.failed(
+          Status.UNAVAILABLE
+            .withDescription(
+              "This scan instance has not yet replicated all vote results. " +
+                "Wait until replication is complete, or connect to a different scan instance."
+            )
+            .asRuntimeException()
+        )
+    }
+
+  override def listVoteRequestResultsV1(
+      respond: ScanResource.ListVoteRequestResultsV1Response.type
+  )(
+      body: definitions.ListVoteResultsRequestV1
+  )(extracted: TraceContext): Future[ScanResource.ListVoteRequestResultsV1Response] = {
+    implicit val tc: TraceContext = extracted
+    withSpan(s"$workflowId.listVoteRequestResultsV1") { _ => _ =>
+      confirmVotesBackfillingIsCompleteThen {
+        votesStore
+          .listVoteResults(
+            body.filters.fold(DbVotesStore.Filters())(voteResultsFiltersV1),
+            PageLimit.tryCreate(body.pageSize),
+            body.pageToken.map(DbVotesStore.VoteResultsPageToken.tryDecodeFromBase64),
+          )
+          .map { page =>
+            ScanResource.ListVoteRequestResultsV1Response.OK(
+              definitions.ListVoteResultsResponseV1(
+                page.resultsInPage.map(encodeVoteResultV1).toVector,
+                page.nextPageToken.map(_.encodeToBase64),
+              )
+            )
+          }
+      }
+    }
+  }
+
+  private def encodeVoteResultV1(row: DbVotesStore.ServedVoteResult): definitions.VoteResultV1 =
+    definitions.VoteResultV1(
+      recordTime = row.recordTime.toInstant.atOffset(ZoneOffset.UTC),
+      synchronizerId = row.synchronizerId,
+      updateId = row.updateId,
+      eventNumber = row.eventNumber,
+      // Same as for backfilling: every vote result of a complete votes store is expected to have one.
+      dsoRulesContractId = row.contractId.getOrElse(
+        throw Status.INTERNAL
+          .withDescription(
+            s"The stored vote result in update ${row.updateId} at ${row.recordTime} has no DsoRules contract id"
+          )
+          .asRuntimeException()
+      ),
+      // Passed on as stored, without decoding it with the codegen of this app.
+      voteResult = io.circe.parser
+        .parse(row.choiceResult)
+        .valueOr(err =>
+          throw Status.INTERNAL
+            .withDescription(
+              s"The stored vote result in update ${row.updateId} at ${row.recordTime} is not valid JSON: $err"
+            )
+            .asRuntimeException()
+        ),
+      // TODO(#8080): include the DsoRules at the time of the vote
+      dsoRules = None,
+    )
+
+  override def countVoteRequestResultsV1(
+      respond: ScanResource.CountVoteRequestResultsV1Response.type
+  )(
+      body: definitions.VoteResultsFiltersV1
+  )(extracted: TraceContext): Future[ScanResource.CountVoteRequestResultsV1Response] = {
+    implicit val tc: TraceContext = extracted
+    withSpan(s"$workflowId.countVoteRequestResultsV1") { _ => _ =>
+      confirmVotesBackfillingIsCompleteThen {
+        votesStore
+          .countVoteResults(voteResultsFiltersV1(body))
+          .map(count =>
+            ScanResource.CountVoteRequestResultsV1Response.OK(
+              definitions.CountVoteResultsResponseV1(count)
+            )
+          )
       }
     }
   }
@@ -2310,7 +2317,9 @@ class HttpScanHandler(
     withSpan(s"$workflowId.getMigrationInfo") { _ => _ =>
       val sourceHistory = updateHistory.sourceHistory
       for {
-        infoO <- sourceHistory.migrationInfo(body.migrationId)
+        infoO <- updateHistory.lastLegacyRecordTime
+          .map(_ => Future.successful(None))
+          .getOrElse(sourceHistory.migrationInfo(body.migrationId))
       } yield infoO match {
         case Some(info) =>
           ScanResource.GetMigrationInfoResponse.OK(
@@ -2380,18 +2389,20 @@ class HttpScanHandler(
           limit = PageLimit.tryCreate(body.limit),
         )
         .map { txs =>
-          definitions.GetImportUpdatesResponse(
-            txs
-              .map(
-                ScanHttpEncodings.encodeUpdate(
-                  _,
-                  encoding = definitions.DamlValueEncoding.members.ProtobufJson,
-                  version = ScanHttpEncodings.V1,
-                  hashInclusionPolicy = ExternalHashInclusionPolicy.ApplyThreshold,
-                  externalTransactionHashThresholdTime = externalTransactionHashThresholdTime,
+          ScanResource.GetImportUpdatesResponse.OK(
+            definitions.GetImportUpdatesResponse(
+              txs
+                .map(
+                  ScanHttpEncodings.encodeUpdate(
+                    _,
+                    encoding = definitions.DamlValueEncoding.members.ProtobufJson,
+                    version = ScanHttpEncodings.V1,
+                    hashInclusionPolicy = ExternalHashInclusionPolicy.ApplyThreshold,
+                    externalTransactionHashThresholdTime = externalTransactionHashThresholdTime,
+                  )
                 )
-              )
-              .toVector
+                .toVector
+            )
           )
         }
     }
@@ -2560,6 +2571,7 @@ class HttpScanHandler(
   )()(extracted: TraceContext): Future[ScanResource.GetBackfillingStatusResponse] = {
     implicit val tc = extracted
     withSpan(s"$workflowId.getBackfillingStatus") { _ => _ =>
+      // TODO(#7728) include the votes store backfilling once we switch over the HTTP endpoints
       for {
         updateHistoryStatus <- updateHistory.getBackfillingState()
         txLogStatus <- store.multiDomainAcsStore.getTxLogBackfillingState()
@@ -2572,6 +2584,97 @@ class HttpScanHandler(
       )
     }
   }
+
+  /** Whether this Scan holds all vote results before `before`: its own backfilling must be
+    * complete (for the votes before its first ingested one), and its ingestion must have reached
+    * `before` (for the votes after it). The votes are ingested together with the ACS store, so
+    * it is the progress of that store that counts, not the progress of the update history.
+    */
+  private def votesAvailability(before: CantonTimestamp)(implicit
+      tc: TraceContext
+  ): Future[definitions.VotesAvailability] =
+    votesStore.isBackfillingComplete().map {
+      case false => definitions.VotesAvailability.Backfilling
+      case true =>
+        val acsStore = store.multiDomainAcsStore
+        if (acsStore.lastIngestedRecordTimes.get(acsStore.synchronizerId).exists(_ >= before))
+          definitions.VotesAvailability.Available
+        else definitions.VotesAvailability.Ingesting
+    }
+
+  override def getVotesBackfillingStatus(
+      respond: ScanResource.GetVotesBackfillingStatusResponse.type
+  )(beforeRecordTime: OffsetDateTime)(
+      extracted: TraceContext
+  ): Future[ScanResource.GetVotesBackfillingStatusResponse] = {
+    implicit val tc: TraceContext = extracted
+    withSpan(s"$workflowId.getVotesBackfillingStatus") { _ => _ =>
+      votesAvailability(CantonTimestamp.assertFromInstant(beforeRecordTime.toInstant)).map(
+        availability =>
+          ScanResource.GetVotesBackfillingStatusResponse.OK(
+            definitions.GetVotesBackfillingStatusResponse(availability)
+          )
+      )
+    }
+  }
+
+  override def getVotesBefore(respond: ScanResource.GetVotesBeforeResponse.type)(
+      body: definitions.GetVotesBeforeRequest
+  )(extracted: TraceContext): Future[ScanResource.GetVotesBeforeResponse] = {
+    implicit val tc: TraceContext = extracted
+    withSpan(s"$workflowId.getVotesBefore") { _ => _ =>
+      val before = VotesBackfillCursor(
+        CantonTimestamp.assertFromInstant(body.beforeRecordTime.toInstant),
+        body.beforeEventNumber,
+      )
+      val limit = PageLimit.tryCreate(body.count)
+      votesAvailability(before.recordTime).flatMap {
+        case definitions.VotesAvailability.Available =>
+          votesStore
+            .listBackfillPage(before, limit)
+            .map(rows =>
+              ScanResource.GetVotesBeforeResponse.OK(
+                definitions.GetVotesBeforeResponse(
+                  rows.map(encodeVoteResultForBackfilling).toVector
+                )
+              )
+            )
+        case availability =>
+          Future.failed(
+            Status.FAILED_PRECONDITION
+              .withDescription(
+                s"This Scan cannot serve vote results before ${before.recordTime} yet: $availability"
+              )
+              .asRuntimeException()
+          )
+      }
+    }
+  }
+
+  private def encodeVoteResultForBackfilling(
+      row: DbVotesStore.ServedVoteResult
+  ): definitions.VoteResultForBackfilling =
+    definitions.VoteResultForBackfilling(
+      recordTime = row.recordTime.toInstant.atOffset(ZoneOffset.UTC),
+      synchronizerId = row.synchronizerId,
+      updateId = row.updateId,
+      eventNumber = row.eventNumber,
+      // Failing here makes peers backfill this page from other Scans, instead of spreading the gap.
+      contractId = row.contractId.getOrElse(
+        throw new IllegalStateException(
+          s"The stored vote result at ${row.recordTime} has no contract id"
+        )
+      ),
+      choiceResult = io.circe.parser
+        .parse(row.choiceResult)
+        .fold(
+          error =>
+            throw new IllegalStateException(
+              s"The stored vote result at ${row.recordTime} is not valid JSON: $error"
+            ),
+          identity,
+        ),
+    )
 
   override def featureSupport(respond: ScanResource.FeatureSupportResponse.type)()(
       extracted: TraceContext
@@ -2663,11 +2766,18 @@ class HttpScanHandler(
 
   private def getStorageEncodings(
       damlValueEncoding: Option[DamlValueEncoding]
-  ): NonEmptyList[ScanStorageConfig.Encoding] =
-    NonEmptyList.one(
-      ScanStorageConfig.Encoding
-        .fromDamlValueEncoding(damlValueEncoding.getOrElse(DamlValueEncoding.CompactJson))
-    )
+  ): NonEmptyList[ScanStorageConfig.Encoding] = {
+    // compact_json, the default of the other endpoints, is not available in bulk storage
+    val requested = damlValueEncoding.getOrElse(DamlValueEncoding.LedgerApiJson)
+    val encoding = ScanStorageConfig.Encoding
+      .fromDamlValueEncoding(requested)
+      .getOrElse(
+        throw io.grpc.Status.INVALID_ARGUMENT
+          .withDescription(s"Encoding '${requested.value}' is not available in bulk storage")
+          .asRuntimeException()
+      )
+    NonEmptyList.one(encoding)
+  }
 
   private def encodeBulkStorageObjects(objects: Seq[ObjectKeyAndChecksum], publicUrl: Uri) =
     objects.map { case ObjectKeyAndChecksum(key, digest) =>
@@ -3072,10 +3182,6 @@ object HttpScanHandler {
       case definitions.BulkObjectKind.members.Updates => BulkObjectKind.Updates
       case definitions.BulkObjectKind.members.Snapshots => BulkObjectKind.Snapshots
     }
-
-  // We expect a handful at most but want to somewhat guard against attacks
-  // so we just hardcode a limit of 100.
-  private val MAX_TRANSFER_COMMAND_CONTRACTS: Int = 100
 
   // for DsoSequencers that use the serial instead of the migration we set -1 as the migration id
   // we can't simply make it non required as it's part of the public API and it would break clients

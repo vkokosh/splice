@@ -9,17 +9,17 @@ import com.digitalasset.canton.concurrent.{FutureSupervisor, Threading}
 import com.digitalasset.canton.lifecycle.FutureUnlessShutdown
 import com.digitalasset.canton.logging.SuppressionRule
 import com.digitalasset.canton.resource.DbStorage
-import com.digitalasset.canton.time.SimClock
 import com.digitalasset.canton.tracing.TraceContext
 import com.digitalasset.canton.util.MonadUtil
 import com.digitalasset.canton.{FutureHelpers, HasActorSystem, HasExecutionContext}
-import org.lfdecentralizedtrust.splice.automation.SqlIndexInitializationTrigger.IndexAction
 import org.lfdecentralizedtrust.splice.store.db.{
   AcsJdbcTypes,
   AcsTables,
   AdvisoryLocks,
   SplicePostgresTest,
+  SqlIndexInitializer,
 }
+import org.lfdecentralizedtrust.splice.store.db.SqlIndexInitializer.{IndexAction, IndexStatus}
 import org.slf4j.event.Level
 import slick.dbio.DBIOAction
 import slick.jdbc.{GetResult, PositionedResult}
@@ -39,8 +39,6 @@ class SqlIndexInitializationTriggerStoreTest
     with AdvisoryLocksTestHelper {
 
   private val expectedIndexNames = Seq(
-    "updt_hist_crea_hi_mi_ci_import_updates",
-    "updt_hist_tran_hi_eth",
     "dso_acs_store_sid_mid_pn_tid_rbio",
     "dso_acs_store_sid_mid_glt_gls",
     "scan_acs_store_sid_mid_glt_gls",
@@ -52,7 +50,7 @@ class SqlIndexInitializationTriggerStoreTest
   "SqlIndexInitializationTrigger" should {
 
     "use if not exists concurrently" in {
-      SqlIndexInitializationTrigger.defaultIndexActions.foreach {
+      SqlIndexInitializer.defaultIndexActions.foreach {
         case IndexAction.Create(_, statement) =>
           // "if not exists" is already enforced by DbStorageIdempotency retrying all statements in tests,
           // but a check here gives better feedback.
@@ -86,7 +84,7 @@ class SqlIndexInitializationTriggerStoreTest
         indexActions = List(
           IndexAction.Create(
             "test_index",
-            sqlu"create index if not exists test_index on update_history_creates (record_time)",
+            sqlu"create index if not exists test_index on dso_acs_store (contract_id)",
           )
         ),
       )
@@ -110,7 +108,7 @@ class SqlIndexInitializationTriggerStoreTest
       for {
         _ <- storage.underlying
           .update(
-            sqlu"create index test_index on update_history_creates (record_time)",
+            sqlu"create index test_index on dso_acs_store (contract_id)",
             "create test index",
           )
           .failOnShutdown
@@ -129,7 +127,7 @@ class SqlIndexInitializationTriggerStoreTest
         indexActions = List(
           IndexAction.Create(
             "test_index",
-            sqlu"create index if not exists test_index on update_history_creates (record_time)",
+            sqlu"create index if not exists test_index on dso_acs_store (contract_id)",
           )
         ),
       )
@@ -137,7 +135,7 @@ class SqlIndexInitializationTriggerStoreTest
       for {
         _ <- storage.underlying
           .update(
-            sqlu"create index test_index on update_history_creates (record_time)",
+            sqlu"create index test_index on dso_acs_store (contract_id)",
             "create test index",
           )
           .failOnShutdown
@@ -181,55 +179,7 @@ class SqlIndexInitializationTriggerStoreTest
         ),
       )
       for {
-        _ <- Future.unit
-        _ <- storage.underlying
-          .update(
-            DBIOAction
-              .seq(
-                sqlu"""
-                  insert into active_parties (store_id, party, closed_round)
-                  values (1, 'test_party', 1)
-                """,
-                sqlu"""
-                  insert into active_parties (store_id, party, closed_round)
-                  values (2, 'test_party2', 1)
-                """,
-              ),
-            "insert test data",
-          )
-          .failOnShutdown
-        _ <- storage.underlying
-          .update(
-            sqlu"""
-              create or replace function slow_function(text) returns text as $$$$
-              begin
-                  perform pg_sleep(5); -- simulate a long-running operation
-                  return $$1;
-              end;
-              $$$$ language plpgsql immutable;
-              """,
-            "create slow_function",
-          )
-          .failOnShutdown
-        _ <- storage.underlying
-          .update(
-            DBIOAction
-              .seq(
-                sqlu"set statement_timeout to '1s'",
-                // This statement will be aborted, because slow_function() takes 5 seconds to execute per row,
-                // and the statement timeout is set to 1 second above.
-                // 'create index concurrently' internally consists of 3 transactions: one to register the index as invalid,
-                // and two table scans to build the index. Aborting the statement will leave the index in an invalid state.
-                sqlu"create index concurrently if not exists test_index on active_parties (slow_function(party))",
-                // `set statement_timeout` lasts for the whole session, and we are using connection pools,
-                // so reset it to default to avoid affecting later statements.
-                sqlu"set statement_timeout to default",
-              )
-              .asTry,
-            "insert test data",
-          )
-          .failOnShutdown
-
+        _ <- createInvalidTestIndex()
         indexNamesBefore <- listIndexNames()
         _ = indexNamesBefore should contain("test_index")
 
@@ -249,8 +199,8 @@ class SqlIndexInitializationTriggerStoreTest
           case other =>
             fail(s"Expected Drop for test_index, got $other")
         }
-        _ <- loggerFactory.assertEventuallyLogsSeq(SuppressionRule.LevelAndAbove(Level.WARN))(
-          within = { trigger.runOnce() },
+        outcome <- loggerFactory.assertEventuallyLogsSeq(SuppressionRule.LevelAndAbove(Level.WARN))(
+          within = { trigger.runOnceWithTaskOutcome() },
           assertion = { entries =>
             forExactly(1, entries) {
               _.message should include(
@@ -259,6 +209,7 @@ class SqlIndexInitializationTriggerStoreTest
             }
           },
         )
+        _ = outcome should matchPattern { case Some(_: TaskSuccess) => }
         indexNamesAfterDrop <- listIndexNames()
         _ = indexNamesAfterDrop should not contain ("test_index")
 
@@ -363,7 +314,7 @@ class SqlIndexInitializationTriggerStoreTest
         indexActions = List(
           IndexAction.Create(
             "test_index",
-            sqlu"create index concurrently if not exists test_index on update_history_creates (record_time)",
+            sqlu"create index concurrently if not exists test_index on dso_acs_store (contract_id)",
           )
         ),
       )
@@ -373,7 +324,9 @@ class SqlIndexInitializationTriggerStoreTest
 
       for {
         _ <- lockAcquired
-        _ <- trigger.runOnce()
+        // The outcome is not asserted: the test only checks that the index is not created while
+        // the lock is held.
+        _ <- trigger.runOnceWithTaskOutcome()
         indexNamesWhileLocked <- listIndexNames()
         _ = indexNamesWhileLocked should not contain "test_index"
         // The contended action is still pending and succeeds once the lock is released
@@ -385,6 +338,122 @@ class SqlIndexInitializationTriggerStoreTest
     }
 
   }
+
+  "SqlIndexInitializer" should {
+
+    "create and drop the default indexes" in {
+      val actions = SqlIndexInitializer.defaultIndexActions
+      for {
+        _ <- applyAll(actions)
+        statuses <- MonadUtil.sequentialTraverse(actions)(action =>
+          indexStatus(action.indexName).map(action -> _)
+        )
+      } yield {
+        val wrong = statuses.collect {
+          case (IndexAction.Create(name, _), status) if status != IndexStatus.Valid =>
+            s"$name should be valid but is $status"
+          case (IndexAction.Drop(name), status) if status != IndexStatus.DoesNotExist =>
+            s"$name should not exist but is $status"
+        }
+        wrong shouldBe empty
+      }
+    }
+
+    "run no DDL when the indexes are already in place" in {
+      val actions = SqlIndexInitializer.defaultIndexActions
+      for {
+        _ <- applyAll(actions)
+        _ <- loggerFactory.assertEventuallyLogsSeq(SuppressionRule.LevelAndAbove(Level.INFO))(
+          within = applyAll(actions),
+          assertion = { entries =>
+            val ddl = entries
+              .map(_.message)
+              .filter(m => m.startsWith("Creating index") || m.startsWith("Dropping index"))
+            ddl shouldBe empty
+          },
+        )
+      } yield succeed
+    }
+
+    "fail on an invalid index" in {
+      val action = IndexAction.Create(
+        "test_index",
+        sqlu"create index concurrently if not exists test_index on active_parties (closed_round)",
+      )
+      for {
+        _ <- createInvalidTestIndex()
+        error <- loggerFactory.assertEventuallyLogsSeq(SuppressionRule.LevelAndAbove(Level.WARN))(
+          within = applyAll(List(action)).failed,
+          assertion = { entries =>
+            forExactly(1, entries) {
+              _.message should include(
+                "Index test_index should be created and is invalid, dropping it"
+              )
+            }
+          },
+        )
+      } yield error.getMessage should include("Index test_index is invalid")
+    }
+  }
+
+  private def applyAll(actions: List[IndexAction]): Future[Unit] =
+    new SqlIndexInitializer(storage, loggerFactory).applyAll(actions).failOnShutdown
+
+  private def indexStatus(indexName: String): Future[IndexStatus] =
+    storage.underlying
+      .query(SqlIndexInitializer.getIndexStatusAction(indexName), "getIndexStatus")
+      .failOnShutdown
+
+  private def createInvalidTestIndex(): Future[Unit] =
+    for {
+      _ <- storage.underlying
+        .update(
+          DBIOAction
+            .seq(
+              sqlu"""
+                insert into active_parties (store_id, party, closed_round)
+                values (1, 'test_party', 1)
+              """,
+              sqlu"""
+                insert into active_parties (store_id, party, closed_round)
+                values (2, 'test_party2', 1)
+              """,
+            ),
+          "insert test data",
+        )
+        .failOnShutdown
+      _ <- storage.underlying
+        .update(
+          sqlu"""
+            create or replace function slow_function(text) returns text as $$$$
+            begin
+                perform pg_sleep(5); -- simulate a long-running operation
+                return $$1;
+            end;
+            $$$$ language plpgsql immutable;
+            """,
+          "create slow_function",
+        )
+        .failOnShutdown
+      _ <- storage.underlying
+        .update(
+          DBIOAction
+            .seq(
+              sqlu"set statement_timeout to '1s'",
+              // This statement will be aborted, because slow_function() takes 5 seconds to execute per row,
+              // and the statement timeout is set to 1 second above.
+              // 'create index concurrently' internally consists of 3 transactions: one to register the index as invalid,
+              // and two table scans to build the index. Aborting the statement will leave the index in an invalid state.
+              sqlu"create index concurrently if not exists test_index on active_parties (slow_function(party))",
+              // `set statement_timeout` lasts for the whole session, and we are using connection pools,
+              // so reset it to default to avoid affecting later statements.
+              sqlu"set statement_timeout to default",
+            )
+            .asTry,
+          "insert test data",
+        )
+        .failOnShutdown
+    } yield ()
 
   private def listIndexNames(): Future[Seq[String]] = {
     storage.underlying
@@ -448,7 +517,6 @@ class SqlIndexInitializationTriggerStoreTest
     trigger.remainingActionsEmpty.future
   }
 
-  private lazy val clock = new SimClock(loggerFactory = loggerFactory)
   private lazy val triggerContext: TriggerContext = TriggerContext(
     AutomationConfig(),
     clock,
@@ -464,7 +532,7 @@ class SqlIndexInitializationTriggerStoreTest
   )(implicit traceContext: TraceContext): FutureUnlessShutdown[?] = for {
     _ <- resetAllAppTables(storage)
     _ <- dropIndexes(
-      SqlIndexInitializationTrigger.defaultIndexActions.map(_.indexName) ++ Seq("test_index")
+      SqlIndexInitializer.defaultIndexActions.map(_.indexName) ++ Seq("test_index")
     )
     // Need to drop this after dropping the indexes using it.
     _ <- storage.update(sqlu"drop function if exists slow_function", "drop slow_function")

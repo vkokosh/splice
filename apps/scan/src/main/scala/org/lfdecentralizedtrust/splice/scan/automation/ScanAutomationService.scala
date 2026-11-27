@@ -6,6 +6,7 @@ package org.lfdecentralizedtrust.splice.scan.automation
 import org.apache.pekko.stream.Materializer
 import org.lfdecentralizedtrust.splice.automation.{
   AutomationServiceCompanion,
+  UpdateHistoryPartitionMaintenanceTrigger,
   SpliceAppAutomationService,
   SqlIndexInitializationTrigger,
   TxLogBackfillingTrigger,
@@ -19,7 +20,11 @@ import org.lfdecentralizedtrust.splice.environment.{
 }
 import org.lfdecentralizedtrust.splice.http.HttpClient
 import org.lfdecentralizedtrust.splice.scan.config.ScanAppBackendConfig
-import org.lfdecentralizedtrust.splice.store.{DomainTimeSynchronization, UpdateHistory}
+import org.lfdecentralizedtrust.splice.store.{
+  DomainTimeSynchronization,
+  KeyValueStore,
+  UpdateHistory,
+}
 import org.lfdecentralizedtrust.splice.scan.store.{
   AcsSnapshotStore,
   AppActivityStore,
@@ -57,6 +62,7 @@ class ScanAutomationService(
     upgradesConfig: UpgradesConfig,
     packageVersionSupport: PackageVersionSupport,
     historyReadiness: HistoryReadiness,
+    kvStore: KeyValueStore,
 )(implicit
     ec: ExecutionContextExecutor,
     mat: Materializer,
@@ -110,6 +116,12 @@ class ScanAutomationService(
     )
 
   registerUpdateHistoryIngestion(updateHistory)
+  registerTrigger(
+    new UpdateHistoryPartitionMaintenanceTrigger(
+      updateHistory,
+      triggerContext,
+    )
+  )
 
   def registerRewardsReferenceStoreIngestion(
       rewardsReferenceStore: ScanRewardsReferenceStore
@@ -161,6 +173,16 @@ class ScanAutomationService(
       )
     )
   }
+  if (config.pruning.snapshots.enabled) {
+    registerTrigger(
+      new PruneAcsSnapshotsTrigger(
+        snapshotStore,
+        scanStorageConfigV1,
+        kvStore,
+        triggerContext,
+      )
+    )
+  }
   // The acs snapshot backfilling trigger should not attempt to backfill snapshots unless the
   // backfilling UpdateHistory is fully enabled and complete.
   if (config.updateHistoryBackfillEnabled && config.updateHistoryBackfillImportUpdatesEnabled) {
@@ -169,15 +191,6 @@ class ScanAutomationService(
         snapshotStore,
         updateHistory,
         scanStorageConfigV1,
-        triggerContext,
-      )
-    )
-  }
-  if (config.updateHistoryBackfillImportUpdatesEnabled) {
-    registerTrigger(
-      new DeleteCorruptAcsSnapshotTrigger(
-        snapshotStore,
-        updateHistory,
         triggerContext,
       )
     )

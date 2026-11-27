@@ -9,6 +9,7 @@ participant:
   adminApiPort: 5002
   # Required by the Canton remote participant config but not used by the monitor
   ledgerApiPort: 5001
+  disableAdminApiAuth: true
 
 # Key fingerprints to track (required)
 keys: []
@@ -18,7 +19,7 @@ pollIntervalSeconds: 60
 slowQueryThresholdSeconds: 5
 missingSynchronizerGracePeriodSeconds: 600
 
-defaultJvmOptions: -XX:+UseG1GC -XX:MaxRAMPercentage=75 -XX:InitialRAMPercentage=75
+defaultJvmOptions: -XX:+UseG1GC -XX:MaxRAMPercentage=75 -XX:InitialRAMPercentage=75 -XX:-UseBASE64Intrinsics
 additionalJvmOptions: ""
 
 resources:

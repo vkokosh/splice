@@ -3,11 +3,13 @@ package org.lfdecentralizedtrust.splice.integration.tests
 import com.digitalasset.canton.HasExecutionContext
 import com.digitalasset.canton.config.CantonRequireTypes.InstanceName
 import com.digitalasset.canton.config.NonNegativeFiniteDuration
+import com.digitalasset.canton.discard.Implicits.DiscardOps
 import com.digitalasset.canton.metrics.MetricValue
 import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
 import com.digitalasset.canton.topology.transaction.VettedPackage
 import com.digitalasset.canton.topology.{ForceFlag, ForceFlags, ParticipantId, PartyId}
 import com.digitalasset.daml.lf.data.Ref.{PackageId, PackageVersion}
+
 import java.time.Duration
 import org.lfdecentralizedtrust.splice.codegen.java.splice.amulet.FeaturedAppRight
 import org.lfdecentralizedtrust.splice.codegen.java.splice.api.rewardassignmentv1.{
@@ -16,7 +18,10 @@ import org.lfdecentralizedtrust.splice.codegen.java.splice.api.rewardassignmentv
   RewardCoupon_AssignBeneficiaries,
 }
 import org.lfdecentralizedtrust.splice.config.ConfigTransforms
-import org.lfdecentralizedtrust.splice.sv.config.InitialRewardConfig
+import org.lfdecentralizedtrust.splice.sv.config.{
+  InitialRewardConfig,
+  UnavailablePartiesBackoffParameters,
+}
 import org.lfdecentralizedtrust.splice.config.ConfigTransforms.{
   ConfigurableApp,
   updateAutomationConfig,
@@ -36,6 +41,7 @@ import org.lfdecentralizedtrust.splice.sv.automation.delegatebased.{
 import org.lfdecentralizedtrust.splice.util.{
   ChoiceContextWithDisclosures,
   TimeTestUtil,
+  TriggerTestUtil,
   UploadablePackage,
   WalletTestUtil,
 }
@@ -56,9 +62,11 @@ class UnhideAndExpireRewardCouponV2TimeBasedIntegrationTest
     extends IntegrationTestWithIsolatedEnvironment
     with HasExecutionContext
     with WalletTestUtil
-    with TimeTestUtil {
+    with TimeTestUtil
+    with TriggerTestUtil {
 
   private val rewardCouponTtl = Duration.ofHours(2)
+  private val unavailablePartiesIgnoreDuration = Duration.ofMinutes(1)
 
   // Version where V2 was introduced, or the current minimum initialization version if higher
   private val minV2AmuletVersion =
@@ -139,7 +147,11 @@ class UnhideAndExpireRewardCouponV2TimeBasedIntegrationTest
           svConfig.copy(
             packageVettingCache = svConfig.packageVettingCache.copy(
               ttl = NonNegativeFiniteDuration.ofMillis(1)
-            )
+            ),
+            unavailablePartiesBackoffParameters = UnavailablePartiesBackoffParameters(
+              baseIgnoreDuration = NonNegativeFiniteDuration.ofMinutes(1),
+              maxIgnoreDuration = NonNegativeFiniteDuration.ofMinutes(1),
+            ),
           )
         )(config)
       )
@@ -239,11 +251,7 @@ class UnhideAndExpireRewardCouponV2TimeBasedIntegrationTest
       uploadAndRevetV2DarsOnAlice(aliceParticipantId)
 
       clue("UnhideRewardCouponV2Trigger unhides Alice's coupons once she is re-vetted") {
-        eventually() {
-          sv1Backend.dsoDelegateBasedAutomation
-            .trigger[UnhideRewardCouponV2Trigger]
-            .runOnce()
-            .futureValue
+        runTasksUntil(sv1Backend.dsoDelegateBasedAutomation.trigger[UnhideRewardCouponV2Trigger]) {
           val coupons = aliceCoupons
           coupons should not be empty
           coupons.filterNot(_.payload.providerIsObserver) shouldBe empty
@@ -310,11 +318,7 @@ class UnhideAndExpireRewardCouponV2TimeBasedIntegrationTest
       )
 
       clue("UnhideRewardCouponV2Trigger can unhide Bob's coupon before he is fully re-vetted") {
-        eventually() {
-          sv1Backend.dsoDelegateBasedAutomation
-            .trigger[UnhideRewardCouponV2Trigger]
-            .runOnce()
-            .futureValue
+        runTasksUntil(sv1Backend.dsoDelegateBasedAutomation.trigger[UnhideRewardCouponV2Trigger]) {
           val coupons = bobUnassignedCoupons.filter(_.payload.round.number == round)
           coupons should not be empty
           coupons.filterNot(_.payload.providerIsObserver) shouldBe empty
@@ -444,10 +448,13 @@ class UnhideAndExpireRewardCouponV2TimeBasedIntegrationTest
       )(
         "ExpireRewardCouponV2Trigger ignores Alice coupons",
         _ => {
+          // The outcome is not asserted: the trigger is not paused, and other expired coupons
+          // may legitimately be archived by this run.
           sv1Backend.dsoDelegateBasedAutomation
             .trigger[ExpireRewardCouponV2Trigger]
-            .runOnce()
+            .runOnceWithTaskOutcome()
             .futureValue
+            .discard
           val remaining = sv1Backend.appState.dsoStore
             .listRewardCouponsV2()
             .futureValue
@@ -458,15 +465,21 @@ class UnhideAndExpireRewardCouponV2TimeBasedIntegrationTest
       )
 
       actAndCheck(
-        "Re-vet Alice",
-        revetV2AmuletOnAlice(aliceParticipantId, aliceParty),
+        "Re-vet Alice", {
+          revetV2AmuletOnAlice(aliceParticipantId, aliceParty)
+          // Alice stays ignored until her backoff window elapses
+          advanceTime(unavailablePartiesIgnoreDuration.plusSeconds(1))
+        },
       )(
         "ExpireRewardCouponV2Trigger archives once Alice is re-vetted",
         _ => {
+          // The outcome is not asserted: the trigger is not paused, so its background polling
+          // may already have archived the coupons; this run only speeds things up.
           sv1Backend.dsoDelegateBasedAutomation
             .trigger[ExpireRewardCouponV2Trigger]
-            .runOnce()
+            .runOnceWithTaskOutcome()
             .futureValue
+            .discard
           val remaining = sv1Backend.appState.dsoStore
             .listRewardCouponsV2()
             .futureValue

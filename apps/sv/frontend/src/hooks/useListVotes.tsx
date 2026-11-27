@@ -1,6 +1,5 @@
 // Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-// TODO(DACH-NY/canton-network-node#7675) - do we need this model?
 import { SvVote } from '@canton-network/splice-common-frontend';
 import { Contract } from '@canton-network/splice-common-frontend-utils';
 import { useQuery, UseQueryResult } from '@tanstack/react-query';
@@ -9,7 +8,7 @@ import * as damlTypes from '@daml/types';
 import { Vote, VoteRequest } from '@daml.js/splice-dso-governance/lib/Splice/DsoRules/module';
 import { ContractId } from '@daml/types';
 
-import { useSvAdminClient } from '../contexts/SvAdminServiceContext';
+import { useGovernanceReadClient } from '../contexts/GovernanceReadClientContext';
 
 function getVoteStatus(votes: damlTypes.Map<string, Vote>): Vote[] {
   const allVotes: Vote[] = [];
@@ -18,7 +17,7 @@ function getVoteStatus(votes: damlTypes.Map<string, Vote>): Vote[] {
 }
 
 export const useListVotes = (contractIds: ContractId<VoteRequest>[]): UseQueryResult<SvVote[]> => {
-  const { listVoteRequestsByTrackingCid } = useSvAdminClient();
+  const { listVoteRequestsByTrackingCid } = useGovernanceReadClient();
   return useQuery({
     queryKey: ['listVoteRequestsByTrackingCid', contractIds],
     queryFn: async () => {

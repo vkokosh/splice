@@ -305,6 +305,12 @@ async function installSvAndValidator(
     additionalJvmOptions: getAdditionalJvmOptions(svConfig.svApp?.additionalJvmOptions),
     resources: svConfig.svApp?.resources,
     persistentDataPvc: persistentHeapDumpsPvc(),
+    participantClient: {
+      adminApi: {
+        // TODO(DACH-NY/canton-network-internal#8256): remove this once we remove the separate admin API auth flag
+        disableAuth: svConfig.participant?.disableParticipantAdminApiAuth ?? false,
+      },
+    },
   };
 
   const svValuesWithSpecifiedAud: ChartValues = {
@@ -395,10 +401,17 @@ async function installSvAndValidator(
     },
     ...synchronizerValues,
     additionalEnvVars: (defaultScanValues.additionalEnvVars || [])
+      .concat(svConfig.scanApp?.additionalEnvVars || [])
       .concat([envoyClientIpHeaderEnvVar('canton.scan-apps.scan-app')])
       .concat(scanRateLimitEnvVars()),
     resources: svConfig.scanApp?.resources,
     pvc: persistentHeapDumpsPvc(),
+    participantClient: {
+      adminApi: {
+        // TODO(DACH-NY/canton-network-internal#8256): remove this once we remove the separate admin API auth flag
+        disableAuth: svConfig.participant?.disableParticipantAdminApiAuth ?? false,
+      },
+    },
   };
 
   const scanValuesWithFixedTokens = {
@@ -453,6 +466,12 @@ async function installSvAndValidator(
     maxVettingDelay: networkWideConfig?.maxVettingDelay,
     resources: svConfig.validatorApp?.resources,
     persistentDataPvc: persistentHeapDumpsPvc(),
+    participantClient: {
+      adminApi: {
+        // TODO(DACH-NY/canton-network-internal#8256): remove this once we remove the separate admin API auth flag
+        disableAuth: svConfig.participant?.disableParticipantAdminApiAuth ?? false,
+      },
+    },
   };
 
   const validatorValuesWithSpecifiedAud: ChartValues = {

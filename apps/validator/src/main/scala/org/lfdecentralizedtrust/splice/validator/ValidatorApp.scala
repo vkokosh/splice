@@ -254,7 +254,6 @@ class ValidatorApp(
                   participantAdminConnection,
                   loggerFactory,
                   config.latestPackagesOnly,
-                  config.parameters.enabledFeatures.enableUnsupportedDarsUnvetting,
                 )
                 _ <-
                   MonadUtil.sequentialTraverse_(Seq(globalSynchronizerId) ++ extraSynchronizerIds) {
@@ -851,12 +850,6 @@ class ValidatorApp(
           loggerFactory,
         )
 
-      packageVersionSupport = PackageVersionSupport.createPackageVersionSupport(
-        synchronizerId,
-        readOnlyLedgerConnection,
-        loggerFactory,
-      )
-
       adminHandler =
         new HttpValidatorAdminHandler(
           automation,
@@ -882,7 +875,6 @@ class ValidatorApp(
             retryProvider,
             validatorTopupConfig,
             dedupDuration,
-            packageVersionSupport,
           ),
           walletManager,
         )
@@ -906,7 +898,6 @@ class ValidatorApp(
           new HttpStatusWalletHandler(
             walletManager,
             loggerFactory,
-            packageVersionSupport,
           ),
           walletManager,
         )

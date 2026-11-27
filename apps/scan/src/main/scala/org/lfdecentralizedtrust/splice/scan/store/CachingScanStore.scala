@@ -3,7 +3,6 @@
 
 package org.lfdecentralizedtrust.splice.scan.store
 
-import com.daml.ledger.javaapi.data.codegen.ContractId
 import com.digitalasset.canton.caching.ScaffeineCache
 import com.digitalasset.canton.data.CantonTimestamp
 import com.digitalasset.canton.lifecycle.{AsyncOrSyncCloseable, FlagCloseableAsync, SyncCloseable}
@@ -26,11 +25,7 @@ import org.lfdecentralizedtrust.splice.codegen.java.splice.governancelock.{
   GovernanceLock,
   GovernanceLockKey,
 }
-import org.lfdecentralizedtrust.splice.codegen.java.splice.externalpartyamuletrules.{
-  ExternalPartyAmuletRules,
-  TransferCommand,
-  TransferCommandCounter,
-}
+import org.lfdecentralizedtrust.splice.codegen.java.splice.externalpartyamuletrules.ExternalPartyAmuletRules
 import org.lfdecentralizedtrust.splice.codegen.java.splice.validatorlicense.ValidatorLicense
 import org.lfdecentralizedtrust.splice.environment.RetryProvider
 import org.lfdecentralizedtrust.splice.scan.config.{CacheConfig, ScanCacheConfig}
@@ -44,7 +39,6 @@ import org.lfdecentralizedtrust.splice.store.{
   ResultsPage,
   SynchronizerStore,
   TxLogStore,
-  UpdateHistory,
   VoteResultsFilters,
 }
 import org.lfdecentralizedtrust.splice.util.{Contract, ContractWithState}
@@ -107,15 +101,6 @@ class CachingScanStore(
       cacheConfig.ansRules,
       (_: Unit) => store.lookupAnsRules(),
     ).get(())
-
-  override def getAmuletConfigForRound(round: Long)(implicit
-      tc: TraceContext
-  ): Future[OpenMiningRoundTxLogEntry] =
-    getCache(
-      "getAmuletConfigForRound",
-      cacheConfig.amuletConfigForRound,
-      store.getAmuletConfigForRound,
-    ).get(round)
 
   override def getTopValidatorLicenses(limit: Limit)(implicit
       tc: TraceContext
@@ -194,33 +179,6 @@ class CachingScanStore(
       tc: TraceContext
   ): Future[Seq[ContractWithState[GovernanceLock.ContractId, GovernanceLock]]] =
     store.listGovernanceLocksByKey(key, limit)
-
-  override def lookupTransferCommandCounterByParty(partyId: PartyId)(implicit
-      tc: TraceContext
-  ): Future[Option[ContractWithState[TransferCommandCounter.ContractId, TransferCommandCounter]]] =
-    getCache(
-      "lookupTransferCommandCounterByParty",
-      cacheConfig.cachedByParty,
-      store.lookupTransferCommandCounterByParty,
-    ).get(partyId)
-
-  override def lookupLatestTransferCommandEvents(sender: PartyId, nonce: Long, limit: Int)(implicit
-      tc: TraceContext
-  ): Future[Map[TransferCommand.ContractId, TransferCommandTxLogEntry]] =
-    store.lookupLatestTransferCommandEvents(sender, nonce, limit)
-
-  override def lookupContractByRecordTime[C, TCId <: ContractId[?], T](
-      companion: C,
-      updateHistory: UpdateHistory,
-      recordTime: CantonTimestamp,
-  )(implicit
-      companionClass: MultiDomainAcsStore.ContractCompanion[C, TCId, T],
-      tc: TraceContext,
-  ): Future[Option[Contract[TCId, T]]] = store.lookupContractByRecordTime(
-    companion,
-    updateHistory,
-    recordTime,
-  )
 
   override def listVoteRequestResults(
       filters: VoteResultsFilters,

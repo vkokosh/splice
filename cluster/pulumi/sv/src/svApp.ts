@@ -31,6 +31,7 @@ import {
   delegatelessAutomationExpectedTaskDuration,
   delegatelessAutomationExpiredRewardCouponBatchSize,
   delegatelessAutomationExpiredRewardCouponNumBatches,
+  unavailablePartiesBackoff,
 } from '@canton-network/splice-pulumi-common/src/automation';
 import { initialAmuletPrice } from '@canton-network/splice-pulumi-common/src/initialAmuletPrice';
 import { Postgres } from '@canton-network/splice-pulumi-common/src/postgres';
@@ -126,6 +127,7 @@ export function installSvApp(
       delegatelessAutomationExpiredRewardCouponBatchSize,
     delegatelessAutomationExpiredRewardCouponNumBatches:
       delegatelessAutomationExpiredRewardCouponNumBatches,
+    unavailablePartiesBackoff: unavailablePartiesBackoff,
     maxVettingDelay: networkWideConfig?.maxVettingDelay,
     logLevel: config.logging?.appsLogLevel,
     apiRequestLogLevel: config.logging?.apiRequestLogLevel,
@@ -133,6 +135,12 @@ export function installSvApp(
     resources: config.svApp?.resources,
     periodicTopologySnapshotConfig: config.periodicTopologySnapshotConfig,
     persistentDataPvc: persistentHeapDumpsPvc(),
+    participantClient: {
+      adminApi: {
+        // TODO(DACH-NY/canton-network-internal#8256): remove this once we remove the separate admin API auth flag
+        disableAuth: config.participant?.disableParticipantAdminApiAuth ?? false,
+      },
+    },
   } as ChartValues;
 
   if (config.onboarding.type == 'join-with-key') {

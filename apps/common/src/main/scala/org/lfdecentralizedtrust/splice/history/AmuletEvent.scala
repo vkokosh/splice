@@ -9,11 +9,6 @@ import org.lfdecentralizedtrust.splice.codegen.java.splice
 import org.lfdecentralizedtrust.splice.codegen.java.splice.{
   amulet as amuletCodegen,
   ans as ansCodegen,
-  externalpartyamuletrules as externalPartyAmuletRulesCodegen,
-}
-import org.lfdecentralizedtrust.splice.codegen.java.splice.round.{
-  ClosedMiningRound,
-  OpenMiningRound,
 }
 import org.lfdecentralizedtrust.splice.util.{
   Contract,
@@ -324,31 +319,6 @@ object AnsRules_CollectEntryRenewalPayment
       template = ansCodegen.AnsRules.COMPANION,
     )
 
-object ExternalPartyAmuletRules_CreateTransferCommand
-    extends ExerciseNodeCompanion.Mk(
-      choice =
-        externalPartyAmuletRulesCodegen.ExternalPartyAmuletRules.CHOICE_ExternalPartyAmuletRules_CreateTransferCommand,
-      template = externalPartyAmuletRulesCodegen.ExternalPartyAmuletRules.COMPANION,
-    )
-
-object TransferCommand_Send
-    extends ExerciseNodeCompanion.Mk(
-      choice = externalPartyAmuletRulesCodegen.TransferCommand.CHOICE_TransferCommand_Send,
-      template = externalPartyAmuletRulesCodegen.TransferCommand.COMPANION,
-    )
-
-object TransferCommand_Withdraw
-    extends ExerciseNodeCompanion.Mk(
-      choice = externalPartyAmuletRulesCodegen.TransferCommand.CHOICE_TransferCommand_Withdraw,
-      template = externalPartyAmuletRulesCodegen.TransferCommand.COMPANION,
-    )
-
-object TransferCommand_Expire
-    extends ExerciseNodeCompanion.Mk(
-      choice = externalPartyAmuletRulesCodegen.TransferCommand.CHOICE_TransferCommand_Expire,
-      template = externalPartyAmuletRulesCodegen.TransferCommand.COMPANION,
-    )
-
 object AmuletArchive {
   // Matches on any consuming exercise on a amulet
   def unapply(event: ExercisedEvent): Option[ExercisedEvent] =
@@ -492,35 +462,6 @@ object AmuletExpireV2
       choice = amuletCodegen.Amulet.CHOICE_Amulet_ExpireV2,
     )
 
-// TODO(DACH-NY/canton-network-node#2930): This is not really a Amulet event - consider either renaming the file, or splitting it into different ones based on event "types"
-object OpenMiningRoundCreate {
-  type TCid = OpenMiningRound.ContractId
-  type T = OpenMiningRound
-  type ContractType = Contract[TCid, T]
-  val companion = OpenMiningRound.COMPANION
-
-  def unapply(
-      event: CreatedEvent
-  ): Option[ContractType] = {
-    Contract.fromCreatedEvent(companion)(event)
-  }
-}
-
-// TODO(DACH-NY/canton-network-node#2930): This is not really a Amulet event - consider either renaming the file, or splitting it into different ones based on event "types"
-object ClosedMiningRoundCreate {
-  type TCid = ClosedMiningRound.ContractId
-  type T = ClosedMiningRound
-  type ContractType = Contract[TCid, T]
-  val companion = ClosedMiningRound.COMPANION
-
-  def unapply(
-      event: CreatedEvent
-  ): Option[ContractType] = {
-    Contract.fromCreatedEvent(companion)(event)
-  }
-}
-
-// TODO(DACH-NY/canton-network-node#2930): This is not really a Amulet event - consider either renaming the file, or splitting it into different ones based on event "types"
 object AppRewardCreate {
   type TCid = amuletCodegen.AppRewardCoupon.ContractId
   type T = amuletCodegen.AppRewardCoupon

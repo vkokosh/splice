@@ -2,80 +2,32 @@
 
 {/* Add all release notes in this section */}
 
-  - Scan App
+  - Participant
 
-    - `/v0/events` responses now include two new per-event fields:
+    - **Breaking** The participant's repair service (`canton.features.enable-repair-commands`) is now disabled by default.
+      This was originally announced for 0.10.0, but the default change was blocked by a bug.
+      **SVs must enable the repair service**, as Scan's `/v0/acs/{party}` endpoint, which validators use to restore from an identities dump,
+      exports the ACS through it. To enable it, set `enableRepairCommands: true` in the `splice-participant` Helm chart
+      (see updated example `participant-values.yaml` for SVs).
+      Validators only need the repair service while restoring from an identities dump (`migrateValidatorParty`) or while running
+      repair commands such as `participant.repair.import_acs`.
+      The Docker Compose validator's `start.sh -i` enables the repair service automatically for the restore.
 
-      - `asset_activity_records`: asset-side activity records (CIP-104). Omitted from JSON when there is no asset activity.
-      - `submitting_app_provider`: the submitting app provider party identifier when the submitter is a featured-app. Omitted from JSON when absent.
-
-    - CIP-104 v1.1 populates four optional fields on `OpenMiningRoundSummary`:
-      `optIssuancePerFeaturedAppRewardCoupon`, `optUnclaimedAppRewards`,
-      `optIssuancePerFeaturedAssetRewardCoupon`, and
-      `optTotalFeaturedAssetRewardCoupons`. The two `*Asset*` fields carry
-      the asset-side issuance ratio and the total featured-asset reward
-      coupons.
-
-    - Explorer operators:
-
-      Because featured-app and featured-asset activity now have separate
-      issuance ratios, explorers should ingest the new `*Asset*` fields
-      alongside the existing app-activity ones; explorers that only read the
-      app-activity fields will under-report total app rewards minted.
-
-    - changed `/v0/internal/reward-accounting-process/rounds/{round_number}/activity-totals` to include additional fields
-
-  - SV App
-
-    - Removed the remaining CometBFT support from the SV app and UI, including the
-      `/v0/admin/domain/cometbft/{status,json-rpc,debug}` endpoints, the
-      `splice_sv_cometbft_*` metrics and the CometBFT debug tab in the SV UI.
-
-    - Added support for the CIP-104 v1.1 (TBAR) governance changes:
-
-      - The amended activity record computation is only used for rounds opening at or after
-        the time set for the switch-over key `cip-104/use-amended-calculation-after`
-        in `svOperationsSwitchOverTimes` of the DSO rules configuration.
-        SVs activate it with a "Set Decentralized Synchronizer Operations (DSO) Rules Configuration" vote.
-
-      - The "Set Amulet Rules Configuration" vote request now supports setting the new
-        Amulet configuration parameters `extraFeaturedAssetActivityWeight` (default `0.2`),
-        `maxExtraFeaturedAssetActivityWeightPerAsset` (default `0.1`), and
-        `dsoAppActivityWeight` (default `0.1`). Leave a parameter blank to use its default.
-
-      - The "Feature Application" vote request now supports setting all featured app metadata:
-        app category (basic featured app, featured asset-moving app, or featured asset),
-        app operations parties, and app composition weight.
-
-      - Added the vote request type "Update Featured Application Metadata (use with Splice 0.10.0 and later)"
-        to change the metadata of an already featured app.
-        Once the vote is accepted, SV app automation applies the change to the app's featured app right;
-        if that does not happen before the vote request timeout, the change expires and is discarded.
-        The older "Update Featured Application Metadata (use before Splice 0.10.0)" vote request type
-        can only change the app composition weight, and will be removed in Splice 0.11.0.
-
-      - The SV app rejects creating a vote request to feature an app or update its metadata if:
-
-        - the provider is already featured (when featuring an app),
-        - the app operations parties contain duplicates or the provider itself, or
-        - one of the app operations parties is already the provider or an app operations party
-          of another featured app.
-
-        The SV UI already flags the first two conditions while filling in the form,
-        and additionally warns if one of the app operations parties is used in another pending vote request.
+## Upcoming for next minor release (template):
 
   - Helm charts and Docker images
 
-    - Removed the remaining CometBFT support including the cometbft helm
-      charts, docker images and unused `splice-info` values.
+    - **Breaking** The deprecated `splice-postgres` Helm chart has been removed. Run Splice against a PostgreSQL
+      instance that you provision yourself; see the [migration guide](https://docs.canton.network/global-synchronizer/production-operations/validator-postgres-migration).
 
-  - Scan App
+    - `splice-participant`: new required value `nodeIdentifier`. Canton now initializes the
+      participant's identity itself, so the chart must be given the same node identifier that
+      the controlling SV or validator app expects, i.e. the previous `nodeIdentifier` of `splice-sv-node`
+      or `splice-validator`. Set it in `participant-values.yaml`.
 
-    - Added `POST /v0/reward-coupons-v2-disclosures`, which returns base64-encoded
-    created event blobs for active `Splice.Amulet:RewardCouponV2` contracts (up to
-    100 contract IDs per request) for use by external reward-sharing automation.
-
-## Upcoming for next minor release (template):
+    - `splice-participant`: new value `enableAutoInit`, default `true`. Set it to `false` when the
+      participant's identity comes from elsewhere, e.g. while restoring from an identities dump or
+      when using an offline root namespace key.
 
 {/* If you introduce any breaking changes in the next minor release,
     then in addition to the release notes as above,
@@ -94,6 +46,68 @@
 
     - Breaking Deployment Changes:
 
+      - the `splice-participant` helm chart now requires `nodeIdentifier`. copy the value that you previously set on the sv app or validator app helm charts.
+
     - Protocol Changes:
 
     - Daml Model Changes:
+
+      - Token standard V2, iterated settlement: fixed `settlementFactoryV2_settleBatchDefaultImpl` in
+        `splice-token-standard-utils` so that it validates the `nextIterationFunding` that the executors
+        pass in `FinalizedAllocation`, instead of the `nextIterationFunding` stored in the allocation.
+        This fixes two bugs and changes the behavior of registries that use this default implementation:
+
+        - Allocations with a zero next iteration funding amount, e.g., `{"X": 0.0}`, could not be settled
+          via the settlement factory, although they can be created. They can be settled now.
+          Zero amounts are valid, e.g., for an authorizer that expects net incoming transfers
+          in the next iteration and thus does not need to reserve any funding.
+        - The executors' next iteration funding was not validated by the factory at all. It now rejects
+          negative amounts, and any next iteration funding for allocations that do not enable iterated settlement,
+          i.e., that have `nextIterationFunding = None`. Canton Coin already rejected both in its `Allocation_Settle`
+          choice. Other registries relying on the default implementation now reject them as well.
+
+        **Registries** that call `settlementFactoryV2_settleBatchDefaultImpl` or `fetchAndValidateAllocations`
+        from `splice-token-standard-utils`: we recommend that you upgrade to version 2.0.2 or later,
+        and make sure that your allocation implementation itself rejects negative next iteration funding amounts.
+        Without the upgrade, your registry cannot settle zero-funded allocations, and it does not validate the
+        funding passed by the executors.
+
+        The documentation of `AllocationSpecification.nextIterationFunding` now states that amounts MUST be
+        non-negative, and the documentation of the token standard V2 allocation API now states that wallets MUST
+        copy `SettlementInfo` and the transfer leg sides verbatim from the settlement request.
+        Registries MAY require an exact match.
+
+      - `DsoRules_SetSynchronizerNodeConfig` now takes the node states of all other SVs and rejects a config
+        that newly claims a sequencer or mediator id that another SV already claims for the same synchronizer.
+        SV apps pass the node states once this version is vetted.
+
+      - Security hardening: add extra assertions to the `WalletAppInstall` choices.
+
+      - `splice-wallet` now depends on `splice-util-batched-markers` and `splice-util-token-standard-wallet`.
+        The versions of these packages that validators vet now follow the voted `splice-wallet` version.
+
+      - All Canton Coin transactions now emit token standard V2 transaction-history events, i.e.,
+        `EventLog_HoldingsChange` events reported by the DSO party. Clients can rely on these events
+        to parse the history of all Canton Coin holdings.
+
+      - To guarantee this, the minimum supported Daml package versions are raised to the ones introduced
+        in Splice 0.6.11, which are the first to implement the token standard V2:
+
+          | name | version |
+          | :--- | :--- |
+          | amulet | 0.1.21 |
+          | amuletNameService | 0.1.22 |
+          | dsoGovernance | 0.1.27 |
+          | validatorLifecycle | 0.1.8 |
+          | wallet | 0.1.22 |
+          | walletPayments | 0.1.21 |
+
+        Nodes no longer upload or vet older versions of these packages, and downgrading the Daml models
+        below these versions is no longer supported.
+
+      - Added a new template `ActivityRecorder` in `splice-amulet` to support extra activity reporting
+        by dedicated synchronizers, as specified by the
+        [CIP-0104 App Activity Recording Extension Hook](https://github.com/canton-foundation/cips/blob/main/cip-0104/cip-0104.md#app-activity-recording-extension-hook).
+
+    - The deprecated `splice-postgres` Helm chart has been removed. Run Splice against a PostgreSQL
+      instance that you provision yourself; see the [migration guide](https://docs.canton.network/global-synchronizer/production-operations/validator-postgres-migration).

@@ -9,10 +9,19 @@ This document provides instructions for AI coding agents (GitHub Copilot, Claude
 * `daml/` holds the Daml packages, one sbt project each. `token-standard/` defines the CIP-0056 token standard APIs, which `daml/splice-amulet` implements.
 * `canton/` is a copy of open-source Canton, not Splice code. Avoid editing it; if you must, record the change in `CANTON_CODE_CHANGES.md` (see "Bumping Our Canton fork" in [MAINTENANCE.md](MAINTENANCE.md)).
 * `cluster/` holds the Helm charts, Pulumi deployment code, and Docker Compose setup.
+* For Canton Network and Daml documentation, prefer the public docs MCP server at `https://docs.canton.network/mcp` (tools `search_canton_network_docs` and `query_docs_filesystem_canton_network_docs`) if it is configured; otherwise read the sources in the `canton-network/cf-docs` repository, e.g. with `gh`.
 
 ## Testing
 
 Every contribution must be tested in an automated test. For further details see the [Testing README](TESTING.md).
+
+For Python, use `scripts/python-checks.py check` and
+`scripts/python-checks.py test` in direnv from the repository root.
+Both accept an optional caller-relative path and select tracked files only.
+Coverage exclusions, additional import directories, and justified stricter-rule
+exceptions live in `scripts/python-checks.json`; see [Python checks](CONTRIBUTING.md#python-checks).
+Keep mypy's `--config-file=` isolation and never execute target code from `check`.
+Ask before substantial refactoring to adopt a stricter rule, or leave a specific TODO.
 
 ## Building and Running Tests
 
@@ -27,7 +36,7 @@ Every contribution must be tested in an automated test. For further details see 
   * Suites named `*FrontendIntegrationTest` drive the frontends through Selenium and also need `./start-frontends.sh`.
 * Do not run bare `sbt test`; use `testOnly` and leave the full suite to CI.
 * CI runs `sbt checkErrors` after tests, which fails on WARN/ERROR lines in the logs under `log/` that don't match `project/ignore-patterns/`. The logs are not rotated, so stale errors from earlier runs also show up; clear `log/` before a run you want to check. The main logs are `log/canton_network_test.clog` (test run and Splice apps) and `log/canton.clog` / `log/canton-simtime.clog` (Canton).
-* `sbt formatFix` applies scalafmt, scalafix, npm fixes and copyright headers (`make format` additionally formats cluster code). `sbt lint` runs the static checks; note that its `scalafixAll` step can rewrite files.
+* `sbt formatFix` applies scalafmt, scalafix, npm fixes and copyright headers (`make format` additionally formats cluster code). `sbt lint` runs the static checks.
 * If dependency resolution fails with a 404 for a Canton snapshot artifact (e.g. `com.daml:bindings-java:<version>-snapshot...`), the pinned snapshot has likely expired; rebase onto the latest `main` and reload direnv.
 
 ## Writing Integration Tests
@@ -36,6 +45,8 @@ Every contribution must be tested in an automated test. For further details see 
 * All test cases of a suite extending `IntegrationTest` share one environment (`IntegrationTestWithIsolatedEnvironment` creates one per test case). Use `perTestCaseName(...)` for party and other names to avoid collisions between test cases.
 * Wrap actions that are expected to log warnings or errors in `loggerFactory.assertLogs` (or a related `SuppressingLogger` method); otherwise `checkErrors` fails in CI.
 * Simulated-time tests mix in `TimeTestUtil` and move the clock with `advanceTime` and related helpers.
+* Run paused task-based triggers with the `TriggerTestUtil` helpers, which check the task's outcome: `runUntilTaskSucceeds` if the test relies on the task being done, `runTasksUntil(trigger)(check)` if the check concerns one of several ready tasks, `runExpectingNoTask` if no task should be ready. `runOnePollingIteration()` also counts a task skipped as stale as done. Do not call these helpers within another `eventually`.
+* Integration tests are expensive: cover variants and edge cases in Daml Script tests, test one representative path here, and add related test cases to an existing suite to share its environment.
 
 ## DB Migrations
 
@@ -49,9 +60,7 @@ If you make intentional changes in Daml code, run `sbt damlDarsLockFileUpdate` a
 
 ### Backwards-compatible Daml changes
 
-All Daml changes must be backwards-compatible. See the [Smart Contract Upgrading Reference from the Canton docs](https://docs.canton.network/appdev/deep-dives/smart-contract-upgrading-reference).
-
-When adding to enums, make sure to only add further nullary constructors to types that only have nullary constructors.
+All Daml changes must be backwards-compatible; see "Future Proofing" in the [Daml Style Guide](DAML_STYLE.md#future-proofing).
 
 Backends must keep working while only an older Daml version is voted in. Guard version-specific behavior, and tag tests that need a newer package with the matching scalatest tag from `org.lfdecentralizedtrust.splice.util.scalatesttags` (e.g. `SpliceAmulet_0_1_19`) so that the compatibility runs skip them. See "Daml Version Bump" and the sections after it in [DEVELOPMENT.md](DEVELOPMENT.md).
 
@@ -65,6 +74,10 @@ When you change a Daml package, bump the version of that package and of every pa
 - To represent Daml `Numeric`s in Protobuf, use `string`s. Conversions to and from `string`s should occur via `org.lfdecentralizedtrust.splice.util.Proto.encode/tryDecode`.
 - When interacting with the Ledger API, convert Scala `BigDecimal`s to Java `BigDecimal`s.
 - Refer to the `wallet.tap` command implementation for the canonical handling of Daml Numerics.
+
+### Daml Code Style
+
+Before writing or reviewing `.daml` files, read the [Daml Style Guide](DAML_STYLE.md).
 
 ## Message Definitions
 
@@ -127,4 +140,12 @@ The `common-frontend` package (`@canton-network/splice-common-frontend`) contain
 
 - Every commit needs a DCO `Signed-off-by:` line; use `git commit -s`.
 - PRs are squash-merged, so the PR title and description become the commit message.
+- User-facing changes, i.e. ones visible to anyone deploying, operating, integrating with or using Splice, need an entry in
+  `release-notes/release_notes_upcoming.mdx` under the next patch release section. Breaking changes also go into the minor release template in the same file.
+  Match the style of the [published release notes](https://docs.canton.network/global-synchronizer/release-notes/splice).
+- Do not disclose an unfixed vulnerability in an issue, PR, commit or release note; handle it as described in [SECURITY.md](SECURITY.md).
+- Mark work that is still to be done with the most specific tag, so that it is tracked and done when it is due:
+  - `FIXME`: must be fixed before the PR is merged. The static CI checks reject FIXMEs.
+  - `TODO(#1234)`: must be fixed as part of that issue. Use the feature's tracking issue if a separate issue makes no sense.
+    For tech debt that will not be addressed as part of the feature you are delivering, create a tech-debt issue and reference it.
 - On branches in this repository, CI only runs if the last commit message contains `[ci]` (or `[static]` for static checks only). See [TESTING.md](TESTING.md) for other tags and for cluster tests.

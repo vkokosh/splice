@@ -77,12 +77,22 @@ function _export_auth0_env_vars {
   # Must equal LEDGER_API_AUTH_AUDIENCE for the portfolio UI to reach the validator API
   VALIDATOR_AUTH_AUDIENCE="https://ledger_api.example.com"
   export VALIDATOR_AUTH_AUDIENCE
+  PARTICIPANT_ADMIN_API_AUTH_AUDIENCE="https://participant_admin_api.example.com"
+  export PARTICIPANT_ADMIN_API_AUTH_AUDIENCE
 }
 
 function _do_start_validator {
-  "${VALIDATOR_DIR}/start.sh" \
-    "$@" \
-      || _error "Failed to start validator, please check ${SPLICE_ROOT}/log/compose.log for details"
+  # retry with exponential backoff (2, 4, 8, 16 s)
+  local attempt=1 delay=2
+  until "${VALIDATOR_DIR}/start.sh" "$@"; do
+    if [ "$attempt" -ge 5 ]; then
+      _error "Failed to start validator, please check ${SPLICE_ROOT}/log/compose.log for details"
+    fi
+    _info "start.sh failed (attempt $attempt of 5), retrying in ${delay}s"
+    sleep "$delay"
+    attempt=$((attempt + 1))
+    delay=$((delay * 2))
+  done
 
   containers=(validator participant nginx)
   if [ "${wallet_gateway:-0}" -eq 1 ]; then
@@ -114,11 +124,14 @@ function _start_validator {
   export LEDGER_API_AUTH_AUDIENCE
   VALIDATOR_AUTH_AUDIENCE="$DEFAULT_AUDIENCE"
   export VALIDATOR_AUTH_AUDIENCE
+  PARTICIPANT_ADMIN_API_AUTH_AUDIENCE="$DEFAULT_AUDIENCE"
+  export PARTICIPANT_ADMIN_API_AUTH_AUDIENCE
 
   extra_flags=()
   if [ "$auth" -eq 1 ]; then
     _export_auth0_env_vars
     extra_flags+=("-a")
+    extra_flags+=("--enable-participant-admin-api-auth")
   fi
   if [ -n "$network_name" ]; then
     extra_flags+=("-n" "$network_name")

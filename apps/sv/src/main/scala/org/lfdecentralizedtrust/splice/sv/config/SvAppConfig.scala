@@ -565,6 +565,7 @@ case class SvAppBackendConfig(
     unclaimedDevelopmentFundCouponsThreshold: Int = 10,
     svAcsStoreDescriptorUserVersion: Option[Long] = None,
     dsoAcsStoreDescriptorUserVersion: Option[Long] = None,
+    unavailablePartiesStoreDescriptorUserVersion: Option[Long] = None,
     // TODO(#3897) Consider removing this once we're confident in this approach.
     // Safety option in case setting the observers ends up causing issues e.g. overloading validators that now receive larger transactions.
     convertFeaturedAppActivityMarkerObservers: Boolean = true,
@@ -579,6 +580,8 @@ case class SvAppBackendConfig(
       PackageVettingLookupService.CacheConfig(),
     useInternalSequencerApi: Boolean = false,
     ignoredAmuletVersions: Set[String] = Set.empty,
+    // Safety list of parties that must never be marked as unavailable by the automation
+    protectedPartyIds: Set[PartyId] = Set.empty,
     // Capped exponential backoff used by the persisted unavailable parties store
     // (used when `enablePersistedUnavailableParties` is set)
     unavailablePartiesBackoffParameters: UnavailablePartiesBackoffParameters =
@@ -590,6 +593,7 @@ case class SvAppBackendConfig(
     // from running concurrently against the same database.  Only disable for migration scenarios
     // where intentional overlap is required.
     instanceLockEnabled: Boolean = true,
+    onboardingSnapshots: SvOnboardingSnapshotsConfig,
 ) extends SpliceBackendConfig {
 
   def allIgnoredAmuletVersions: Set[String] =
@@ -663,7 +667,7 @@ final case class SvSequencerConfig(
     sequencerAvailabilityDelay: NonNegativeFiniteDuration = NonNegativeFiniteDuration.ofSeconds(60),
     pruning: Option[SequencerPruningConfig] = None,
     // TODO (#8263): remove once DA BFT is the only supported sequencer
-    isCantonBftSequencer: Boolean = false,
+    isCantonBftSequencer: Boolean = true,
     cantonBftPruning: Option[PruningConfig] = Some(
       PruningConfig(
         cron = "0 /10 * * * ?", // Run every 10min,
@@ -714,7 +718,6 @@ final case class SvSynchronizerNodeConfig(
     // We want to be able to override this for simtime tests
     topologyChangeDelayDuration: NonNegativeFiniteDuration =
       NonNegativeFiniteDuration.ofMillis(250),
-    // TODO(##7162) Set sensible defaults here once Canton comes up with some magic numbers.
     synchronizerLimits: Option[SynchronizerLimits] = Some(
       SvSynchronizerNodeConfig.defaultSynchronizerLimits
     ),
@@ -782,6 +785,15 @@ final case class RangeConfig(
 
 final case class UnavailablePartiesBackoffParameters(
     baseIgnoreDuration: NonNegativeFiniteDuration = NonNegativeFiniteDuration.ofMinutes(10),
+    // random jitter in [0, baseIgnoreDurationJitter) added to the base duration of newly ignored parties
+    baseIgnoreDurationJitter: NonNegativeFiniteDuration = NonNegativeFiniteDuration.ofMinutes(2),
     // 24h: 100k parties with 1 task each leads to 100k / (24*3600s) = 1.15 tasks/s
     maxIgnoreDuration: NonNegativeFiniteDuration = NonNegativeFiniteDuration.ofHours(24),
+)
+
+final case class SvOnboardingSnapshotsConfig(
+    directory: Path,
+    retention: PositiveFiniteDuration = PositiveFiniteDuration.ofHours(24),
+    parallelism: PositiveInt = PositiveInt.one,
+    queueSize: PositiveInt = PositiveInt.tryCreate(4),
 )

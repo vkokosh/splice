@@ -154,7 +154,7 @@ class AppUpgradeIntegrationTest
             spliceProcs.startBundledSplice(conf, inputConfig)
           }
 
-          eventually(5.minute) {
+          eventually(10.minutes) {
             Seq("sv1", "sv2", "sv3").foreach(sv => {
               sv_client(s"${sv}Client").httpHealth.successOption.exists(_.active) should be(
                 true
@@ -317,7 +317,8 @@ class AppUpgradeIntegrationTest
           )
 
           clue("SVs have vetted new dso governance version") {
-            eventually() {
+            // SVs first upload all DARs of the new package config before vetting them, which can take more than 20s.
+            eventually(60.seconds) {
               // dso party vetting only changes once all SVs vetted the package.
               val preferredPackages =
                 sv1Backend.participantClientWithAdminToken.ledger_api.interactive_submission
@@ -657,7 +658,6 @@ object AppUpgradeIntegrationTest {
     val result = Process(
       Seq("bash", "-c", cmd),
       None,
-      // TODO(DACH-NY/canton-network-node#10595): consider reading these from config files:
       "SV1_URL" -> "http://127.0.0.1:5114",
       "SV1_SCAN_URL" -> "http://127.0.0.1:5012",
       "SV2_SCAN_URL" -> "http://127.0.0.1:5112",

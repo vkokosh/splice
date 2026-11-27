@@ -14,10 +14,7 @@ import org.lfdecentralizedtrust.splice.codegen.java.splice.amuletrules.{
   AppTransferContext,
   TransferPreapproval,
 }
-import org.lfdecentralizedtrust.splice.codegen.java.splice.externalpartyamuletrules.{
-  ExternalPartyAmuletRules,
-  TransferCommandCounter,
-}
+import org.lfdecentralizedtrust.splice.codegen.java.splice.externalpartyamuletrules.ExternalPartyAmuletRules
 import org.lfdecentralizedtrust.splice.codegen.java.splice.round.{
   ClosedMiningRound,
   IssuingMiningRound,
@@ -209,23 +206,6 @@ abstract class ScanAppReference(
       httpCommand(HttpScanAppClient.LookupTransferPreapprovalByParty(party))
     }
 
-  @Help.Summary("Lookup a TransferCommandCounter by the receiver party")
-  def lookupTransferCommandCounterByParty(
-      party: PartyId
-  ): Option[ContractWithState[TransferCommandCounter.ContractId, TransferCommandCounter]] =
-    consoleEnvironment.run {
-      httpCommand(HttpScanAppClient.LookupTransferCommandCounterByParty(party))
-    }
-
-  @Help.Summary("Lookup the status of a TransferCommand")
-  def lookupTransferCommandStatus(
-      sender: PartyId,
-      nonce: Long,
-  ): Option[definitions.LookupTransferCommandStatusResponse] =
-    consoleEnvironment.run {
-      httpCommand(HttpScanAppClient.LookupTransferCommandStatus(sender, nonce))
-    }
-
   @Help.Summary(
     "Get the (cached) amulet config effective now. Note that changes to the config might take some time to propagate due to the client-side caching."
   )
@@ -302,14 +282,6 @@ abstract class ScanAppReference(
   ): Map[String, ByteString] =
     consoleEnvironment.run {
       httpCommand(HttpScanAppClient.GetRewardCouponsV2Disclosures(contractIds))
-    }
-
-  @Help.Summary("Get the Amulet config parameters for a given round")
-  def getAmuletConfigForRound(
-      round: Long
-  ): HttpScanAppClient.AmuletConfig =
-    consoleEnvironment.run {
-      httpCommand(HttpScanAppClient.GetAmuletConfigForRound(round))
     }
 
   @Help.Summary(
@@ -439,6 +411,9 @@ abstract class ScanAppReference(
       pageSize: Int = 100,
       partyIds: Option[Vector[PartyId]] = None,
       templates: Option[Vector[PackageQualifiedName]] = None,
+      damlValueEncoding: Option[definitions.DamlValueEncoding] = Some(
+        definitions.DamlValueEncoding.LedgerApiJson
+      ),
   ) =
     consoleEnvironment.run {
       httpCommand(
@@ -450,6 +425,7 @@ abstract class ScanAppReference(
           pageSize,
           partyIds,
           templates,
+          damlValueEncoding,
         )
       )
     }
@@ -463,6 +439,9 @@ abstract class ScanAppReference(
       ),
       after: Option[String] = None,
       pageSize: Int = 100,
+      damlValueEncoding: Option[definitions.DamlValueEncoding] = Some(
+        definitions.DamlValueEncoding.LedgerApiJson
+      ),
   ) =
     consoleEnvironment.run {
       httpCommand(
@@ -473,6 +452,7 @@ abstract class ScanAppReference(
           recordTimeMatch,
           after,
           pageSize,
+          damlValueEncoding,
         )
       )
     }
@@ -842,6 +822,34 @@ abstract class ScanAppReference(
       )
     }
   }
+
+  @Help.Summary("Count vote results")
+  def countVoteRequestResults(filters: VoteResultsFilters): Long =
+    consoleEnvironment.run {
+      httpCommand(
+        HttpScanAppClient.CountVoteRequestResults(filters)
+      )
+    }
+
+  @Help.Summary("List vote results from the votes store (experimental)")
+  def listVoteRequestResultsV1(
+      filters: VoteResultsFilters,
+      pageSize: Int,
+      pageToken: Option[String] = None,
+  ): (Seq[HttpScanAppClient.VoteResultV1], Option[String]) =
+    consoleEnvironment.run {
+      httpCommand(
+        HttpScanAppClient.ListVoteRequestResultsV1(filters, pageSize, pageToken)
+      )
+    }
+
+  @Help.Summary("Count vote results in the votes store (experimental)")
+  def countVoteRequestResultsV1(filters: VoteResultsFilters): Long =
+    consoleEnvironment.run {
+      httpCommand(
+        HttpScanAppClient.CountVoteRequestResultsV1(filters)
+      )
+    }
 
   @Help.Summary(
     "List the BFT sequencers"

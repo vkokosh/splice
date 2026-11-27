@@ -1,5 +1,6 @@
 package org.lfdecentralizedtrust.splice.store
 
+import com.digitalasset.canton.time.SimClock
 import cats.data.NonEmptyList
 import com.daml.ledger.api.v2.TraceContextOuterClass
 import com.daml.ledger.javaapi.data.codegen.{ContractId, DamlRecord as CodegenDamlRecord}
@@ -89,7 +90,6 @@ import org.lfdecentralizedtrust.splice.util.*
 import org.scalatest.wordspec.AsyncWordSpec
 import org.slf4j.event.Level
 
-import java.nio.file.{Files, Paths}
 import java.time.temporal.ChronoUnit
 import java.time.{Duration, Instant}
 import java.util
@@ -119,40 +119,30 @@ abstract class StoreTestBase
       NoOpMetricsFactory,
     )
 
-  // Looks up the package name from the package ID in dars.lock, to avoid having to parse all DARs just to find this mapping
-  // TODO(#3937): this is quite hacky. What we should really do is just auto-generate DarResources instead of deriving it from DARs at runtime.
-  protected def tryGetPackageNameFromDarLock(identifier: Identifier): Option[String] = {
-    val path = Paths.get("daml/dars.lock")
-    Files
-      .readAllLines(path)
-      .asScala
-      .map(_.trim.split("\\s+"))
-      .filter(line => line.length > 1 && line(2) == identifier.getPackageId)
-      .map(_(0))
-      .headOption
-  }
+  // All packages in the generated DarResources, including splitwell, which
+  // `PackageQualifiedName.lookupFromResources` doesn't cover.
+  private lazy val packageNamesFromResources: Map[String, String] =
+    DarResources.packageResources.view
+      .flatMap(_.all)
+      .map(resource => resource.packageId -> (resource.metadata.name: String))
+      .toMap
 
-  protected def getPackageName(identifier: Identifier) = {
-    tryGetPackageNameFromDarLock(identifier).getOrElse(
-      PackageQualifiedName
-        .lookupFromResources(identifier)
-        .map(_.packageName)
-        // should only be necessary for upgrade/malicious identifiers
-        .orElse(
-          Map(
-            upgradedAppRewardCouponPackageId -> amuletCodegen.AppRewardCoupon.PACKAGE_NAME,
-            dummyHoldingPackageId -> DummyHolding.PACKAGE_NAME, // not in DarResources
-            maliciousPackageId -> "malicious-package",
-          )
-            .get(identifier.getPackageId)
+  // Packages that are not in DarResources: test-only DARs and mock package IDs.
+  private lazy val packageNamesNotInResources: Map[String, String] = Map(
+    upgradedAppRewardCouponPackageId -> amuletCodegen.AppRewardCoupon.PACKAGE_NAME,
+    dummyHoldingPackageId -> DummyHolding.PACKAGE_NAME,
+    maliciousPackageId -> "malicious-package",
+  )
+
+  protected def getPackageName(identifier: Identifier): String =
+    packageNamesFromResources
+      .get(identifier.getPackageId)
+      .orElse(packageNamesNotInResources.get(identifier.getPackageId))
+      .getOrElse(
+        throw new IllegalArgumentException(
+          s"Identifier is not present in resources nor does it look like mock data: $identifier"
         )
-        .getOrElse(
-          throw new IllegalArgumentException(
-            s"Identifier is not present in resources nor does it look like mock data: $identifier"
-          )
-        )
-    )
-  }
+      )
 
   protected def mkPartyId(name: String) = PartyId.tryFromProtoPrimitive(name + "::dummy")
 
@@ -218,33 +208,6 @@ abstract class StoreTestBase
       identifier = templateId,
       contractId =
         new externalpartyamuletrulesCodegen.ExternalPartyAmuletRules.ContractId(nextCid()),
-      payload = template,
-    )
-  }
-
-  protected def transferCommand(
-      sender: PartyId,
-      receiver: PartyId,
-      delegate: PartyId,
-      amount: BigDecimal,
-      expiresAt: Instant,
-      nonce: Long,
-  ) = {
-    val templateId = externalpartyamuletrulesCodegen.TransferCommand.TEMPLATE_ID_WITH_PACKAGE_ID
-
-    val template = new externalpartyamuletrulesCodegen.TransferCommand(
-      dsoParty.toProtoPrimitive,
-      sender.toProtoPrimitive,
-      receiver.toProtoPrimitive,
-      delegate.toProtoPrimitive,
-      amount.bigDecimal,
-      expiresAt,
-      nonce,
-      Optional.of("transfer-command-description"),
-    )
-    contract(
-      identifier = templateId,
-      contractId = new externalpartyamuletrulesCodegen.TransferCommand.ContractId(nextCid()),
       payload = template,
     )
   }
@@ -1143,6 +1106,12 @@ abstract class StoreTestBase
 
   protected lazy val dummyDomain = StoreTestBase.dummyDomain
 
+  protected lazy val clock: SimClock = new SimClock(loggerFactory = loggerFactory)
+
+  protected def mockLedgerConnection(
+      firstRecordTime: CantonTimestamp = CantonTimestamp.Epoch
+  ): BaseLedgerConnection = StoreTestBase.mockLedgerConnection(firstRecordTime)
+
   protected val dummy2Domain = SynchronizerId.tryFromString("dummy2::domain")
 
   protected val domainMigrationId = 0L
@@ -1362,7 +1331,7 @@ abstract class StoreTestBase
       incompleteIn: Seq[StoreTestBase.AcsImportIncompleteEntry] = Seq.empty,
       acsOffset: Long = nextOffset(),
   )(implicit store: MultiDomainAcsStore): Future[Unit] = for {
-    _ <- store.testIngestionSink.initialize()
+    _ <- store.testIngestionSink.initialize(mockLedgerConnection())
     _ <- acs(activeContracts, incompleteOut, incompleteIn, acsOffset)
   } yield ()
 
@@ -1404,8 +1373,11 @@ abstract class StoreTestBase
 
     override def ingestionFilter: MultiDomainAcsStore.IngestionFilter =
       underlying.ingestionFilter
-    override def initialize()(implicit traceContext: TraceContext) =
-      underlying.initialize()
+    override def initialize(connection: BaseLedgerConnection)(implicit
+        traceContext: TraceContext,
+        mat: Materializer,
+    ) =
+      underlying.initialize(connection)
 
     override def ingestAcsStreamInBatches(
         source: Source[Seq[BaseLedgerConnection.ActiveContractsItem], NotUsed],
@@ -1784,6 +1756,52 @@ object StoreTestBase {
   }
 
   val dummyDomain = SynchronizerId.tryFromString("dummy::domain")
+
+  def mockLedgerConnection(
+      firstRecordTime: CantonTimestamp = CantonTimestamp.Epoch
+  ): BaseLedgerConnection =
+    mockLedgerConnectionWithUpdates(
+      Seq(
+        LedgerClient.GetTreeUpdatesResponse(
+          TreeUpdateOrOffsetCheckpoint.Update(
+            TransactionTreeUpdate(
+              new Transaction(
+                "first-update",
+                "",
+                "",
+                firstRecordTime.toInstant,
+                java.util.Collections.emptyList(),
+                1L,
+                dummyDomain.toProtoPrimitive,
+                TraceContextOuterClass.TraceContext.getDefaultInstance,
+                firstRecordTime.toInstant,
+                ByteString.EMPTY,
+                0L,
+              )
+            ),
+            dummyDomain,
+          )
+        )
+      )
+    )
+
+  def mockLedgerConnectionWithUpdates(
+      updates: Seq[LedgerClient.GetTreeUpdatesResponse]
+  ): BaseLedgerConnection = {
+    val connection = org.mockito.Mockito.mock(classOf[BaseLedgerConnection])
+    org.mockito.Mockito
+      .when(connection.latestPrunedOffset()(org.mockito.ArgumentMatchers.any[TraceContext]()))
+      .thenReturn(Future.successful(0L))
+    org.mockito.Mockito
+      .when(
+        connection.updates(
+          org.mockito.ArgumentMatchers.anyLong(),
+          org.mockito.ArgumentMatchers.any[MultiDomainAcsStore.IngestionFilter](),
+        )(org.mockito.ArgumentMatchers.any[TraceContext]())
+      )
+      .thenReturn(Source(updates))
+    connection
+  }
 
   object TxLogEntry extends StoreErrors {
 

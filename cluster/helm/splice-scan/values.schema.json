@@ -210,6 +210,22 @@
           "type": "string",
           "description": "Duration for which update history remains analyzable, e.g. \"30 days\"."
         },
+        "pruning": {
+          "type": "object",
+          "properties": {
+            "snapshots": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "description": "Drop ACS snapshots stored in per-snapshot tables that are older than the analyzable time window, except the daily bulk storage ones."
+                }
+              },
+              "required": ["enabled"]
+            }
+          },
+          "required": ["snapshots"]
+        },
         "cluster": {
           "type": "object",
           "properties": {
@@ -332,6 +348,45 @@
         "uiPollInterval": {
           "type": "number",
           "description": "The interval in milliseconds to poll the UI for updates"
+        },
+        "participantClient": {
+          "type": "object",
+          "description": "Configuration parameters for the participant client.",
+          "properties": {
+            "adminApi": {
+              "type": "object",
+              "properties": {
+                "disableAuth": {
+                  "type": "boolean"
+                },
+                "auth": {
+                  "type": "object",
+                  "properties": {
+                    "secretName": {
+                      "type": "string"
+                    },
+                    "secretOverrides": {
+                      "type": "object",
+                      "properties": {
+                        "audience": {
+                          "type": "string"
+                        },
+                        "url": {
+                          "type": "string"
+                        },
+                        "clientId": {
+                          "type": "string"
+                        },
+                        "clientSecret": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }

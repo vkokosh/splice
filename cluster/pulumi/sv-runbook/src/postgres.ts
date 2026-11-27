@@ -4,6 +4,7 @@ import * as _ from 'lodash';
 import {
   CloudSqlConfig,
   clusterSmallDisk,
+  defaultPostgresImage,
   ExactNamespace,
   loadYamlFromFile,
   SPLICE_ROOT,
@@ -47,8 +48,7 @@ export async function installPostgres(
       parent => installPasswordWithParent(parent, xns, name, secretName),
       // No need to support legacy chart
       {
-        deployment: 'docker-image',
-        postgresImage: valuesFromFile.db.postgresImage || 'postgres:18',
+        postgresImage: valuesFromFile.db.postgresImage || defaultPostgresImage,
       },
       values,
       undefined, // overrideDbSizeFromValues

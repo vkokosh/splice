@@ -1055,6 +1055,8 @@ lazy val `splice-wallet-daml` =
           (`splice-wallet-payments-daml` / Compile / damlBuild).value ++
           (`splice-amulet-name-service-daml` / Compile / damlBuild).value ++
           (`splice-util-daml` / Compile / damlBuild).value ++
+          (`splice-util-batched-markers-daml` / Compile / damlBuild).value ++
+          (`splice-util-token-standard-wallet-daml` / Compile / damlBuild).value ++
           (`splice-api-token-metadata-v1-daml` / Compile / damlBuild).value ++
           (`splice-api-token-transfer-instruction-v2-daml` / Compile / damlBuild).value ++
           (`splice-api-token-allocation-instruction-v2-daml` / Compile / damlBuild).value ++
@@ -1328,6 +1330,8 @@ lazy val `apps-common` =
         aws_s3,
         s3mock_testcontainers,
       ),
+      // Needed to use transcode, which is written in Scala 3
+      scalacOptions += "-Ytasty-reader",
       BuildCommon.sharedAppSettings,
       buildInfoKeys := Seq[BuildInfoKey](
         BuildInfoKey(
@@ -1480,6 +1484,7 @@ lazy val `apps-scan` =
         pekko_http_cors,
         scalapb_runtime_grpc,
         scalapb_runtime,
+        circe_yaml % Test,
       ),
       BuildCommon.sharedAppSettings,
       templateDirectory := (`openapi-typescript-template` / patchTemplate).value,

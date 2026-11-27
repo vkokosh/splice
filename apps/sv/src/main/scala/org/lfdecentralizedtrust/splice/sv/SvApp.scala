@@ -465,6 +465,7 @@ class SvApp(
           dsoPartyHosting,
           loggerFactory,
         ),
+        svAutomation.onboardingSnapshotService,
         loggerFactory,
       )
 
@@ -514,7 +515,7 @@ class SvApp(
           val errorHandler = new HttpErrorHandler(loggerFactory)
           def buildOperation(service: String, operation: String) = {
             metrics.httpServerMetrics
-              .withMetrics(service)(operation)(traceContext)
+              .withMetrics(service)(operation)
               .tflatMap(_ => {
                 httpRateLimiter.withRateLimit(service)(operation).tflatMap { _ =>
                   config.parameters.customTimeouts.get(operation) match {
@@ -541,6 +542,7 @@ class SvApp(
                 publicHandler,
                 operation =>
                   buildOperation("svPublic", operation)
+                    .tflatMap(_ => withRangeSupport)
                     .tflatMap(_ => provide(traceContext)),
               ),
               SvOperatorResource.routes(
@@ -763,7 +765,6 @@ object SvApp {
       )
   }
 
-  // TODO(DACH-NY/canton-network-node#5364): move this and like functions into appropriate utility namespaces
   def prepareValidatorOnboarding(
       secret: ValidatorOnboardingSecret,
       expiresIn: NonNegativeFiniteDuration,

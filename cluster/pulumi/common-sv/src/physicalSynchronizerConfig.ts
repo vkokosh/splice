@@ -4,6 +4,7 @@ import * as _ from 'lodash';
 import {
   CloudSqlConfigSchema,
   DecentralizedSynchronizerUpgradeConfig,
+  defaultPostgresImage,
   EnvVarConfigSchema,
   K8sResourceSchema,
   spliceConfig,
@@ -21,8 +22,7 @@ export const SvMediatorConfigSchema = z
     cloudSql: CloudSqlWithOverrideConfigSchema,
     // Mediator is either deployed on cloudSQL or is reset frequently, so we can skip migration
     splicePostgres: SplicePostgresSchema.default({
-      postgresImage: 'postgres:18-trixie',
-      deployment: 'docker-image',
+      postgresImage: defaultPostgresImage,
     }),
     resources: K8sResourceSchema,
   })
@@ -35,8 +35,7 @@ export const SvSequencerConfigSchema = z
     cloudSql: CloudSqlWithOverrideConfigSchema,
     // Sequencer is either deployed on cloudSQL or is reset frequently, so we can skip migration
     splicePostgres: SplicePostgresSchema.default({
-      postgresImage: 'postgres:18-trixie',
-      deployment: 'docker-image',
+      postgresImage: defaultPostgresImage,
     }),
     resources: K8sResourceSchema,
     enableAntiAffinity: z.boolean().default(true),
